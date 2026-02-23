@@ -75,8 +75,7 @@ services:
     environment:
       - USER_DATA_PATH=/data/user
       - DICTIONARIES_PATH=/data/dictionaries
-      - JWT_SECRET=${JWT_SECRET:-change_me_in_production}
-      - JWT_EXPIRE_HOURS=168
+      - JWT_SECRET=${JWT_SECRET:-}
     volumes:
       - ./data/user:/data/user
       - ${DICTIONARIES_PATH:-/data/dictionaries}:/data/dictionaries
