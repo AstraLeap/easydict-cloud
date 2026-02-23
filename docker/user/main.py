@@ -43,7 +43,6 @@ SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
 
 REQUIRED_FILES = {"metadata.json", "dictionary.db", "logo.png"}
 OPTIONAL_FILES = {"media.db"}
@@ -65,7 +64,6 @@ class UserLogin(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in: int
     user: dict
 
 
@@ -131,8 +129,7 @@ def verify_password(stored: str, password: str) -> bool:
 
 
 def create_token(user_id: int, username: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS)
-    payload = {"sub": str(user_id), "username": username, "exp": expire}
+    payload = {"sub": str(user_id), "username": username}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -344,7 +341,6 @@ async def register(data: UserRegister):
     return TokenResponse(
         access_token=token,
         token_type="bearer",
-        expires_in=JWT_EXPIRE_HOURS * 3600,
         user={"id": user_id, "username": data.username, "email": data.email.lower()}
     )
 
@@ -362,7 +358,6 @@ async def login(data: UserLogin):
     return TokenResponse(
         access_token=token,
         token_type="bearer",
-        expires_in=JWT_EXPIRE_HOURS * 3600,
         user={"id": user["id"], "username": user["username"], "email": user["email"]}
     )
 

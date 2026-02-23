@@ -1,457 +1,251 @@
-# EasyDict Docker 部署指南
+# EasyDict Cloud
 
-本文档介绍如何在服务器上部署 EasyDict 词典服务。
+EasyDict 词典服务的 Docker 部署方案，提供词典查询、词典分发、用户认证和设置同步功能。
 
-## 目录结构
+## 服务架构
 
 ```
-docker/
-├── docker-compose.yml    # Docker Compose 配置文件
-├── nginx.conf            # Nginx 反向代理配置
-├── deploy.sh             # 一键部署脚本
-├── .env.example          # 环境变量示例
-├── README.md             # 本文件
-├── logs/                 # 日志目录（自动生成）
-└── api/                  # 后端 API 服务
-    ├── Dockerfile
-    ├── main.py
-    └── requirements.txt
+                     ┌─────────────────────────────────────┐
+                     │           Nginx (端口 3070)          │
+                     │         反向代理 + 路由分发           │
+                     └──────────────┬──────────────────────┘
+                                    │
+               ┌────────────────────┴────────────────────┐
+               │                                         │
+        ┌──────▼──────┐                          ┌───────▼──────┐
+        │  API 服务    │                          │  User 服务   │
+        │  (port 8080) │                          │  (port 8000) │
+        │             │                          │              │
+        │ 词典查询     │                          │ 用户注册登录  │
+        │ 词典下载     │                          │ 设置同步      │
+        │ 音频/图片    │                          │ 词典上传管理  │
+        │ 辅助数据     │                          │              │
+        └──────┬──────┘                          └───────┬──────┘
+               │                                         │
+               └────────────────┬────────────────────────┘
+                                │
+                    ┌───────────▼───────────┐
+                    │      数据目录          │
+                    │  /data/dictionaries/  │  ← 词典数据
+                    │  /data/auxiliary/     │  ← 辅助数据（en.db 等）
+                    │  /data/user/          │  ← 用户数据（自动生成）
+                    └───────────────────────┘
 ```
 
 ## 快速开始
 
-### 1. 准备词典数据
+### 前置要求
 
-在服务器上准备词典数据目录，结构如下：
+- Docker >= 20.10
+- Docker Compose >= 2.0（或 docker-compose >= 1.29）
 
-```
-/data/dictionaries/           # 词典数据根目录
-├── 653/                     # 词典 ID 目录（可以是数字）
-│   ├── dictionary.db        # 词典数据库（SQLite）
-│   ├── audios/              # 音频文件目录
-│   │   ├── example.mp3
-│   │   └── hello.mp3
-│   └── images/              # 图片文件目录
-│       ├── example.png
-│       └── diagram.png
-├── dictid654/               # 词典 ID 目录（可以是任意字符串）
-│   ├── dictionary.db
-│   ├── audios/
-│   └── images/
-├── oxford/                  # 词典 ID 目录（可以是英文名称）
-│   ├── dictionary.db
-│   ├── audios/
-│   └── images/
-└── ...
+### 1. 克隆仓库
+
+```bash
+git clone git@github.com:AstraLeap/easydict-cloud.git
+cd easydict-cloud/docker
 ```
 
 ### 2. 配置环境变量
 
 ```bash
-# 复制环境变量示例文件
 cp .env.example .env
-
-# 编辑 .env 文件，设置词典数据路径
-vim .env
 ```
 
-`.env` 文件内容示例：
+编辑 `.env` 文件，**至少需要配置以下内容**：
 
 ```env
+# 词典数据目录（必填）
 DICTIONARIES_PATH=/data/dictionaries
+
+# 辅助数据目录，存放 en.db 等文件（可选）
+AUXILIARY_PATH=/data/auxiliary
+
+# JWT 密钥（建议设置，否则服务重启后所有用户 Token 失效）
+JWT_SECRET=your_random_secret_here
 ```
 
-### 3. 部署服务
+### 3. 准备词典数据
 
-#### 方式一：使用部署脚本（推荐）
+在 `DICTIONARIES_PATH` 目录下按以下结构放置词典数据：
+
+```
+/data/dictionaries/
+├── oxford/                  # 词典 ID（可以是任意字符串）
+│   ├── dictionary.db        # 词典数据库（SQLite，必须）
+│   ├── metadata.json        # 词典元数据（必须）
+│   ├── logo.png             # 词典图标（必须）
+│   ├── media.db             # 媒体数据库（可选）
+│   └── audios/              # 音频文件目录（可选）
+│       └── hello.mp3
+└── collins/
+    ├── dictionary.db
+    ├── metadata.json
+    └── logo.png
+```
+
+`metadata.json` 必须包含以下字段：
+
+```json
+{
+  "id": "oxford",
+  "name": "牛津高阶英汉双解词典",
+  "source_language": "en",
+  "target_language": "zh"
+}
+```
+
+### 4. 启动服务
 
 ```bash
+# 方式一：一键部署脚本（推荐）
 chmod +x deploy.sh
 ./deploy.sh
-```
 
-#### 方式二：手动部署
-
-```bash
-# 创建日志目录
+# 方式二：手动启动
 mkdir -p logs/nginx
-
-# 构建并启动服务
-docker-compose up -d --build
-
-# 或使用新版 Docker Compose
 docker compose up -d --build
 ```
 
-### 4. 验证部署
+### 5. 验证部署
 
 ```bash
-# 查看服务状态
-docker-compose ps
+# 健康检查
+curl http://localhost:3070/health
 
-# 查看日志
-docker-compose logs -f
+# 查询词典列表
+curl http://localhost:3070/dictionaries
 
-# 测试健康检查
-curl http://localhost/health
-
-# 测试词典查询
-curl http://localhost/dictid653/word/example
+# 查询单词
+curl http://localhost:3070/word/oxford/hello
 ```
 
-## API 接口说明
+## API 接口
 
-### 1. 查询单词
+### 词典查询
 
-```
-GET /{词典ID}/word/{单词}
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/dictionaries` | 获取所有词典列表 |
+| GET | `/word/{词典ID}/{单词}` | 查询单词 |
+| GET | `/audio/{词典ID}/{文件名}` | 获取音频文件 |
+| GET | `/image/{词典ID}/{文件名}` | 获取图片文件 |
+| GET | `/auxi/{文件名}` | 获取辅助数据文件（如 en.db） |
 
-**示例：**
+### 词典下载
 
-```bash
-# 使用数字 ID
-curl http://easydict.org/653/word/example
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/download/{词典ID}/logo` | 获取词典图标 |
+| GET | `/download/{词典ID}/metadata` | 获取词典元数据 |
+| GET | `/download/{词典ID}/database` | 下载词典数据库 |
+| GET | `/download/{词典ID}/media` | 下载媒体数据库 |
 
-# 使用自定义 ID
-curl http://easydict.org/dictid653/word/example
-curl http://easydict.org/oxford/word/hello
-```
+### 用户服务
 
-**响应：**
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/user/register` | 用户注册 |
+| POST | `/user/login` | 用户登录 |
+| GET | `/settings` | 获取用户设置 |
+| POST | `/settings` | 上传用户设置 |
+| GET | `/user/dicts` | 获取用户词典列表 |
 
-```json
-{
-  "dict_id": "653",
-  "word": "example",
-  "entries": [
-    {
-      "id": "1",
-      "headword": "example",
-      "entry_type": "word",
-      "pronunciations": [...],
-      "senses": [...]
-    }
-  ],
-  "total": 1
-}
-```
+### 词典上传（贡献者）
 
-### 2. 获取音频文件
+词典上传通过 `upload.` 子域名进行，需在 Nginx/反向代理层配置域名路由：
 
-```
-GET /{词典ID}/audio/{文件名}.mp3
-```
+| 方法 | 路径（upload 子域名） | 说明 |
+|------|------|------|
+| POST | `/` | 上传新词典 |
+| POST | `/{词典ID}` | 更新已有词典 |
 
-**示例：**
+### 更新检查
 
-```bash
-curl http://easydict.org/653/audio/example.mp3
-curl http://easydict.org/oxford/audio/hello.mp3
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/update/{词典ID}` | 检查词典更新 |
 
-### 3. 获取图片文件
+## 环境变量说明
 
-```
-GET /{词典ID}/image/{文件名}.png
-```
+| 变量名 | 必填 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `DICTIONARIES_PATH` | 是 | `/data/dictionaries` | 词典数据目录 |
+| `AUXILIARY_PATH` | 否 | `/data/auxiliary` | 辅助数据目录 |
+| `JWT_SECRET` | 否 | 随机生成 | JWT 签名密钥，建议固定设置，否则重启后 Token 全部失效 |
+| `JWT_EXPIRE_HOURS` | 否 | `168` | Token 有效期（小时） |
+| `LOG_LEVEL` | 否 | `info` | 日志级别 |
 
-**示例：**
+## 配置 HTTPS（可选）
 
-```bash
-curl http://easydict.org/653/image/example.png
-curl http://easydict.org/oxford/image/diagram.png
-```
-
-### 4. 健康检查
-
-```
-GET /health
-```
-
-### 5. 列出所有词典（词典商店）
-
-```
-GET /dictionaries
-```
-
-**响应：**
-
-```json
-{
-  "dictionaries": [
-    {
-      "id": "653",
-      "name": "牛津高阶词典",
-      "description": "经典英语学习词典",
-      "version": "1.0.0",
-      "author": "Oxford",
-      "language": "en",
-      "entry_count": 185000,
-      "has_database": true,
-      "has_audios": true,
-      "has_images": true,
-      "has_logo": true,
-      "has_metadata": true,
-      "audio_count": 50000,
-      "image_count": 2000,
-      "database_size": 52428800
-    }
-  ]
-}
-```
-
-### 6. 获取词典详情
-
-```
-GET /dictionaries/{词典ID}
-```
-
-**示例：**
-
-```bash
-curl http://easydict.org/dictionaries/653
-```
-
-### 7. 获取词典 Logo
-
-```
-GET /dictionaries/{词典ID}/logo
-```
-
-**示例：**
-
-```bash
-curl http://easydict.org/dictionaries/653/logo -o logo.png
-```
-
-### 8. 获取词典元数据
-
-```
-GET /dictionaries/{词典ID}/metadata
-```
-
-**示例：**
-
-```bash
-curl http://easydict.org/dictionaries/653/metadata
-```
-
-### 9. 下载词典（支持选择性下载）
-
-```
-GET /dictionaries/{词典ID}/download?db={0|1}&audios={0|1}&images={0|1}
-```
-
-**参数：**
-
-- `db`: 是否包含数据库文件 (默认: 1)
-- `audios`: 是否包含音频文件 (默认: 0)
-- `images`: 是否包含图片文件 (默认: 0)
-
-**注意：** `metadata.json` 和 `logo.png` 始终包含
-
-**示例：**
-
-```bash
-# 仅下载数据库（最小安装）
-curl http://easydict.org/dictionaries/653/download?db=1 -o 653_db.tar
-
-# 下载数据库+音频
-curl http://easydict.org/dictionaries/653/download?db=1&audios=1 -o 653_db_audios.tar
-
-# 完整下载
-curl http://easydict.org/dictionaries/653/download?db=1&audios=1&images=1 -o 653_full.tar
-```
-
-## Nginx 配置说明
-
-`nginx.conf` 中配置了三个主要路由：
-
-1. **单词查询** (`/{词典ID}/word/{单词}`)
-   - 转发到后端 API 服务
-   - 查询 SQLite 数据库返回 JSON
-
-2. **音频文件** (`/{词典ID}/audio/{文件名}.mp3`)
-   - Nginx 直接提供静态文件
-   - 路径映射：`/data/dictionaries/{词典ID}/audios/`
-
-3. **图片文件** (`/{词典ID}/image/{文件名}.png`)
-   - Nginx 直接提供静态文件
-   - 路径映射：`/data/dictionaries/{词典ID}/images/`
-
-## 域名配置
-
-如果你使用 `https://easydict.org`，需要在服务器上配置反向代理：
-
-### 使用 Nginx（服务器层面）
+服务默认监听 `3070` 端口（HTTP）。如需 HTTPS，在服务器层用 Nginx 做反向代理：
 
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name easydict.org;
+    server_name your-domain.com;
 
-    # SSL 配置
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
     location / {
-        proxy_pass http://localhost:80;
-        proxy_http_version 1.1;
+        proxy_pass http://localhost:3070;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-
-server {
-    listen 80;
-    server_name easydict.org;
-    return 301 https://$server_name$request_uri;
-}
 ```
 
-### 使用 Cloudflare 等 CDN
-
-如果使用 Cloudflare，只需：
-
-1. 将域名 DNS 指向服务器 IP
-2. 在 Cloudflare 开启 HTTPS
-3. 服务器上保持 HTTP（80端口）即可
+也可以使用 Cloudflare 等 CDN，将 DNS 指向服务器 IP，开启 HTTPS 代理即可。
 
 ## 常用命令
 
 ```bash
-# 启动服务
-docker-compose up -d
-
-# 停止服务
-docker-compose down
-
-# 重启服务
-docker-compose restart
+# 查看服务状态
+docker compose ps
 
 # 查看日志
-docker-compose logs -f
-
-# 查看特定服务日志
-docker-compose logs -f api
-docker-compose logs -f nginx
+docker compose logs -f
 
 # 重新构建并启动
-docker-compose up -d --build
+docker compose up -d --build
+
+# 停止服务
+docker compose down
 
 # 进入容器调试
-docker-compose exec api /bin/sh
-docker-compose exec nginx /bin/sh
+docker compose exec api /bin/sh
+docker compose exec user /bin/sh
 ```
 
 ## 故障排查
 
-### 1. 词典数据库无法访问
-
-检查词典目录权限：
+### 词典无法查询
 
 ```bash
-# 检查目录是否存在
-ls -la $DICTIONARIES_PATH
+# 检查词典目录是否挂载正确
+docker compose exec api ls /data/dictionaries/
 
-# 检查数据库文件
-ls -la $DICTIONARIES_PATH/dictid653/dictionary.db
-
-# 检查文件权限
+# 检查数据库文件权限
 chmod -R 755 $DICTIONARIES_PATH
 ```
 
-### 2. 音频/图片文件 404
-
-检查文件路径：
+### 用户服务异常
 
 ```bash
-# 检查音频文件
-ls -la $DICTIONARIES_PATH/dictid653/audios/
+# 检查用户数据目录是否可写
+docker compose exec user ls /data/user/
 
-# 检查图片文件
-ls -la $DICTIONARIES_PATH/dictid653/images/
+# 查看详细日志
+docker compose logs user
 ```
 
-### 3. 查看详细日志
+### 查看 Nginx 访问日志
 
 ```bash
-# API 服务日志
-docker-compose logs api
-
-# Nginx 访问日志
-docker-compose exec nginx cat /var/log/nginx/access.log
-
-# Nginx 错误日志
-docker-compose exec nginx cat /var/log/nginx/error.log
-```
-
-### 4. 数据库连接问题
-
-进入 API 容器检查：
-
-```bash
-docker-compose exec api /bin/sh
-
-# 检查词典目录
-ls -la /data/dictionaries/
-
-# 测试数据库连接
-python -c "import sqlite3; conn = sqlite3.connect('/data/dictionaries/dictid653/dictionary.db'); print('OK')"
-```
-
-## 性能优化
-
-### 1. 启用 Nginx 缓存
-
-已在 `nginx.conf` 中配置静态文件缓存：
-
-```nginx
-# 音频/图片缓存 30 天
-expires 30d;
-add_header Cache-Control "public, immutable";
-```
-
-### 2. 数据库连接池
-
-API 服务已内置数据库连接缓存，避免重复连接。
-
-### 3. 使用 CDN
-
-对于音频和图片文件，建议使用 CDN（如 Cloudflare、阿里云 CDN）加速。
-
-## 安全建议
-
-1. **使用 HTTPS**：生产环境务必启用 HTTPS
-2. **限制访问**：使用防火墙限制端口访问
-3. **定期备份**：定期备份词典数据
-4. **日志监控**：配置日志监控和告警
-
-## 更新维护
-
-### 更新代码
-
-```bash
-# 拉取最新代码
-git pull
-
-# 重新构建并启动
-docker-compose up -d --build
-```
-
-### 更新词典数据
-
-直接替换服务器上的词典文件即可，无需重启服务：
-
-```bash
-# 替换数据库文件
-cp new_dictionary.db /data/dictionaries/dictid653/dictionary.db
-
-# 添加新的音频/图片文件
-cp new_audio.mp3 /data/dictionaries/dictid653/audios/
+docker compose exec nginx cat /var/log/nginx/access.log
+docker compose exec nginx cat /var/log/nginx/error.log
 ```
 
 ## 许可证
