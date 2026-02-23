@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+{% block title %}控制台 - EasyDict 贡献者平台{% endblock %}
+
+{% block extra_style %}
+<style>
+/* Full-width dict rows */
+.dicts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 20px;
+}
+
+.dict-row {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color .2s;
+}
+.dict-row:hover { border-color: var(--accent); }
+
+.dict-row-main {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 20px;
+}
+
+.dict-row-logo {
+    width: 44px; height: 44px;
+    border-radius: 8px;
+    background: var(--accent-light);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.3rem;
+    flex-shrink: 0;
+}
+
+.dict-row-info {
+    flex: 1;
+    min-width: 0;
+}
+.dict-row-name {
+    font-weight: 600;
+    font-size: .97rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dict-row-meta {
+    font-size: .78rem;
+    color: var(--text-muted);
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+}
+
+.dict-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+/* History panel */
+.dict-row-panel {
+    border-top: 1px solid var(--border);
+    padding: 16px 20px;
+    background: var(--bg);
+    display: none;
+}
+.dict-row-panel.open { display: block; }
+
+.panel-section { display: none; }
+.panel-section.active { display: block; }
+
+/* History log */
+.history-log {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+.history-entry {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: .82rem;
+    padding: 6px 10px;
+    background: var(--surface);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+}
+.history-ver {
+    font-weight: 700;
+    color: var(--accent);
+    min-width: 40px;
+    font-family: monospace;
+}
+.history-type {
+    font-size: .72rem;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+.history-type-file { background: #4f86f722; color: var(--info); border: 1px solid #4f86f755; }
+.history-type-entry { background: #3ba55c22; color: var(--success); border: 1px solid #3ba55c55; }
+.history-msg { flex: 1; color: var(--text); }
+.history-file { color: var(--text-muted); font-family: monospace; font-size: .75rem; }
+.history-date { color: var(--text-muted); font-size: .74rem; white-space: nowrap; }
+
+/* Entry upsert form inside panel */
+.entry-upsert-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.entry-upsert-form label {
+    font-size: .83rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.entry-upsert-form .row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+}
+.entry-upsert-form .row input[type="file"] {
+    flex: 1;
+    font-size: .84rem;
+    color: var(--text);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px;
+}
+
+/* Toggle button indicator */
+.toggle-indicator {
+    font-size: .78rem;
+    color: var(--text-muted);
+    transition: transform .2s;
+    display: inline-block;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width:100%;padding:32px 28px;">
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="alerts">
+        {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+
+    <div class="section-header">
+        <div class="section-title">我的词典</div>
+        <a class="btn btn-primary btn-sm" href="{{ url_for('new_dict') }}">+ 上传新词典</a>
+    </div>
+
+    {% if dicts %}
+    <div class="dicts-list">
+        {% for d in dicts %}
+        {% set hist = histories.get(d.dict_id, []) %}
+        <div class="dict-row" id="row-{{ d.dict_id }}">
+
+            <!-- Main info row -->
+            <div class="dict-row-main">
+                <div class="dict-row-logo">📖</div>
+
+                <div class="dict-row-info">
+                    <div class="dict-row-name">{{ d.name }}</div>
+                    <div class="dict-row-meta">
+                        <span style="font-family:monospace">{{ d.dict_id }}</span>
+                        {% if d.has_media %}
+                        <span style="color:var(--success)">● 含媒体库</span>
+                        {% else %}
+                        <span>● 无媒体库</span>
+                        {% endif %}
+                        <span>更新于 {{ d.updated_at[:10] }}</span>
+                        {% if hist %}
+                        <span>v{{ hist[0].version }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="dict-row-actions">
+                    <a class="btn btn-outline btn-sm"
+                       href="{{ url_for('edit_dict', dict_id=d.dict_id) }}">编辑</a>
+                    <button class="btn btn-outline btn-sm"
+                            onclick="togglePanel('{{ d.dict_id }}', 'upsert')"
+                            id="btn-upsert-{{ d.dict_id }}">
+                        条目更新
+                    </button>
+                    <button class="btn btn-outline btn-sm"
+                            onclick="togglePanel('{{ d.dict_id }}', 'history')"
+                            id="btn-history-{{ d.dict_id }}">
+                        历史
+                        {% if hist %}
+                        <span style="background:var(--accent-light);color:var(--accent);font-size:.72rem;padding:0 5px;border-radius:4px;">{{ hist|length }}</span>
+                        {% endif %}
+                    </button>
+                    <button class="btn btn-danger btn-sm"
+                            onclick="confirmDelete('{{ d.dict_id }}', '{{ d.name }}')">删除</button>
+                </div>
+            </div>
+
+            <!-- Expandable panel -->
+            <div class="dict-row-panel" id="panel-{{ d.dict_id }}">
+
+                <!-- Upsert section -->
+                <div class="panel-section" id="section-upsert-{{ d.dict_id }}">
+                    <form method="post"
+                          action="{{ url_for('upsert_entry', dict_id=d.dict_id) }}"
+                          enctype="multipart/form-data"
+                          class="entry-upsert-form">
+                        <div>
+                            <label>Entry JSON 文件 <span class="required-badge">必须</span></label>
+                            <input type="file" name="entry" accept=".json,application/json" required>
+                        </div>
+                        <div>
+                            <label>更新说明 <span class="required-badge">必填</span></label>
+                            <textarea name="update_message" rows="2" required
+                                      placeholder="简述本次更新内容…"></textarea>
+                        </div>
+                        <div>
+                            <button type="submit" class="btn btn-primary btn-sm">写入条目</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- History section -->
+                <div class="panel-section" id="section-history-{{ d.dict_id }}">
+                    {% if hist %}
+                    <div class="history-log">
+                        {% for h in hist %}
+                        <div class="history-entry">
+                            <span class="history-ver">v{{ h.version }}</span>
+                            <span class="history-type {% if h.change_type == 'file' %}history-type-file{% else %}history-type-entry{% endif %}">
+                                {{ h.change_type }}
+                            </span>
+                            <span class="history-msg">{{ h.message }}</span>
+                            <span class="history-file">
+                                {{ h.file_name }}{% if h.entry_id %} #{{ h.entry_id }}{% endif %}
+                            </span>
+                            <span class="history-date">{{ h.created_at[:10] }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div style="color:var(--text-muted);font-size:.85rem;padding:8px 0;">暂无版本记录</div>
+                    {% endif %}
+                </div>
+
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <span class="icon">📚</span>
+        <p>还没有上传任何词典</p>
+        <a class="btn btn-primary" href="{{ url_for('new_dict') }}">上传第一本词典</a>
+    </div>
+    {% endif %}
+
+</div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+var _panelState = {};
+
+function togglePanel(dictId, tab) {
+    var panel = document.getElementById('panel-' + dictId);
+    var state = _panelState[dictId] || { open: false, tab: null };
+    if (state.open && state.tab === tab) {
+        // Same button again — close
+        panel.classList.remove('open');
+        _panelState[dictId] = { open: false, tab: tab };
+    } else {
+        // Open or switch tab
+        panel.classList.add('open');
+        _panelState[dictId] = { open: true, tab: tab };
+        ['upsert', 'history'].forEach(function(t) {
+            var sec = document.getElementById('section-' + t + '-' + dictId);
+            if (t === tab) sec.classList.add('active');
+            else sec.classList.remove('active');
+        });
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}注册 - EasyDict 贡献者平台{% endblock %}
+
+{% block content %}
+<div class="center-box">
+    <div class="card">
+        <div class="card-title">创建账号</div>
+        <div class="card-sub">加入 EasyDict 贡献者，上传和管理词典</div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="alerts">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <form method="post" action="{{ url_for('register') }}">
+            <div class="form-group">
+                <label for="username">用户名</label>
+                <input type="text" id="username" name="username" placeholder="3-32 位字母、数字或下划线"
+                       value="{{ request.form.get('username', '') }}" autocomplete="username" required>
+                <div class="hint">登录时使用，不可修改</div>
+            </div>
+            <div class="form-group">
+                <label for="email">邮箱</label>
+                <input type="email" id="email" name="email" placeholder="your@email.com"
+                       value="{{ request.form.get('email', '') }}" autocomplete="email" required>
+            </div>
+            <div class="form-group">
+                <label for="password">密码</label>
+                <input type="password" id="password" name="password" placeholder="至少 8 位"
+                       autocomplete="new-password" required>
+            </div>
+            <div class="form-group">
+                <label for="confirm">确认密码</label>
+                <input type="password" id="confirm" name="confirm" placeholder="再次输入密码"
+                       autocomplete="new-password" required>
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">注册</button>
+        </form>
+
+        <hr class="divider">
+        <div style="text-align:center;font-size:.88rem;color:var(--text-muted)">
+            已有账号？<a class="link" href="{{ url_for('login') }}">立即登录</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
