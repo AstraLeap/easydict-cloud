@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: easydict-nginx
+    ports:
+      - "3070:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${DICTIONARIES_PATH:-/data/dictionaries}:/data/dictionaries:ro
+      - ${AUXILIARY_PATH:-/data/auxiliary}:/data/auxiliary:ro
+      - ./logs/nginx:/var/log/nginx
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    depends_on:
+      - api
+      - user
+    restart: unless-stopped
+    networks:
+      - easydict-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: easydict-api
+    environment:
+      - DICTIONARIES_PATH=/data/dictionaries
+      - AUXILIARY_PATH=/data/auxiliary
+      - USER_DATA=/data/user
+      - PORT=8080
+      - LOG_LEVEL=info
+    volumes:
+      - ./api/main.py:/app/main.py:ro
+      - ${DICTIONARIES_PATH:-/data/dictionaries}:/data/dictionaries:ro
+      - ${AUXILIARY_PATH:-/data/auxiliary}:/data/auxiliary:ro
+      - ./data/user:/data/user:ro
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    restart: unless-stopped
+    networks:
+      - easydict-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  user:
+    build:
+      context: ./user
+      dockerfile: Dockerfile
+    container_name: easydict-user
+    environment:
+      - USER_DATA_PATH=/data/user
+      - DICTIONARIES_PATH=/data/dictionaries
+      - JWT_SECRET=${JWT_SECRET:-change_me_in_production}
+      - JWT_EXPIRE_HOURS=168
+    volumes:
+      - ./data/user:/data/user
+      - ${DICTIONARIES_PATH:-/data/dictionaries}:/data/dictionaries
+    expose:
+      - "8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - easydict-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  easydict-network:
+    driver: bridge

@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}EasyDict 贡献者平台{% endblock %}</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface2: #22263a;
+            --border: #2e3347;
+            --accent: #5865f2;
+            --accent-hover: #4752c4;
+            --accent-light: #5865f220;
+            --text: #e2e5f1;
+            --text-muted: #8b90a7;
+            --success: #3ba55c;
+            --danger: #ed4245;
+            --warning: #faa61a;
+            --info: #4f86f7;
+            --radius: 10px;
+            --shadow: 0 4px 24px rgba(0,0,0,.4);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        /* ---- Nav ---- */
+        nav {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 24px;
+            display: flex;
+            align-items: center;
+            height: 56px;
+            gap: 16px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .nav-brand {
+            font-weight: 700;
+            font-size: 1.05rem;
+            color: var(--text);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .nav-brand span.tag {
+            background: var(--accent);
+            color: #fff;
+            font-size: .65rem;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 4px;
+            letter-spacing: .03em;
+        }
+        .nav-spacer { flex: 1; }
+        .nav-link {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: .9rem;
+            padding: 6px 10px;
+            border-radius: 6px;
+            transition: background .15s, color .15s;
+        }
+        .nav-link:hover { background: var(--surface2); color: var(--text); }
+        .nav-user {
+            font-size: .88rem;
+            color: var(--text-muted);
+            position: relative;
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: 6px;
+            transition: background .15s, color .15s;
+            user-select: none;
+        }
+        .nav-user:hover { background: var(--surface2); color: var(--text); }
+        .nav-user-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: calc(100% + 6px);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+            min-width: 120px;
+            z-index: 200;
+            overflow: hidden;
+        }
+        .nav-user.open .nav-user-dropdown { display: block; }
+        .nav-user-dropdown a {
+            display: block;
+            padding: 9px 16px;
+            font-size: .88rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            transition: background .1s, color .1s;
+        }
+        .nav-user-dropdown a:hover { background: var(--surface2); color: var(--text); }
+
+        /* ---- Layout ---- */
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 32px 20px;
+        }
+        .center-box {
+            max-width: 440px;
+            margin: 60px auto;
+            padding: 0 20px;
+        }
+
+        /* ---- Cards ---- */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px 32px;
+            box-shadow: var(--shadow);
+        }
+        .card-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .card-sub {
+            font-size: .9rem;
+            color: var(--text-muted);
+            margin-bottom: 24px;
+        }
+
+        /* ---- Forms ---- */
+        .form-group { margin-bottom: 18px; }
+        label {
+            display: block;
+            font-size: .85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+        input[type="text"],
+        input[type="email"],
+        input[type="password"],
+        textarea {
+            width: 100%;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            padding: 10px 14px;
+            font-size: .95rem;
+            outline: none;
+            transition: border-color .2s, box-shadow .2s;
+        }
+        input:focus, textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-light);
+        }
+        textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+
+        /* File upload */
+        .upload-area {
+            background: var(--surface2);
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            padding: 18px 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color .2s, background .2s;
+            position: relative;
+        }
+        .upload-area:hover, .upload-area.drag-over {
+            border-color: var(--accent);
+            background: var(--accent-light);
+        }
+        .upload-area input[type="file"] {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+            width: 100%;
+            height: 100%;
+        }
+        .upload-icon { font-size: 1.5rem; margin-bottom: 6px; display: block; }
+        .upload-label { font-size: .85rem; color: var(--text-muted); }
+        .upload-label strong { color: var(--accent); }
+        .file-name {
+            font-size: .8rem;
+            color: var(--success);
+            margin-top: 6px;
+            word-break: break-all;
+        }
+        .required-badge {
+            display: inline-block;
+            background: var(--danger);
+            color: #fff;
+            font-size: .62rem;
+            font-weight: 700;
+            padding: 1px 5px;
+            border-radius: 4px;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
+        .optional-badge {
+            display: inline-block;
+            background: var(--border);
+            color: var(--text-muted);
+            font-size: .62rem;
+            font-weight: 700;
+            padding: 1px 5px;
+            border-radius: 4px;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
+
+        /* ---- Buttons ---- */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 9px 18px;
+            border-radius: 8px;
+            border: none;
+            font-size: .9rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background .15s, transform .1s, opacity .15s;
+        }
+        .btn:active { transform: scale(.97); }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-outline {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+        .btn-outline:hover { background: var(--surface2); }
+        .btn-danger { background: var(--danger); color: #fff; }
+        .btn-danger:hover { background: #c03537; }
+        .btn-sm { padding: 5px 12px; font-size: .82rem; }
+        .btn[disabled], .btn.loading { opacity: .6; cursor: not-allowed; pointer-events: none; }
+        .btn-full { width: 100%; justify-content: center; }
+
+        /* ---- Alerts ---- */
+        .alerts { margin-bottom: 20px; }
+        .alert {
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: .88rem;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+        .alert-success { background: #3ba55c22; border: 1px solid #3ba55c55; color: #6ede95; }
+        .alert-danger  { background: #ed424522; border: 1px solid #ed424555; color: #f77d7f; }
+        .alert-warning { background: #faa61a22; border: 1px solid #faa61a55; color: #ffc761; }
+        .alert-info    { background: #4f86f722; border: 1px solid #4f86f755; color: #80aaff; }
+
+        /* ---- Dict cards grid ---- */
+        .dicts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            margin-top: 20px;
+        }
+        .dict-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 20px;
+            transition: border-color .2s;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .dict-card:hover { border-color: var(--accent); }
+        .dict-card-header { display: flex; align-items: center; gap: 12px; }
+        .dict-logo {
+            width: 44px; height: 44px;
+            border-radius: 8px;
+            background: var(--surface2);
+            object-fit: contain;
+            border: 1px solid var(--border);
+        }
+        .dict-logo-placeholder {
+            width: 44px; height: 44px;
+            border-radius: 8px;
+            background: var(--accent-light);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.3rem;
+            flex-shrink: 0;
+        }
+        .dict-name { font-weight: 600; font-size: .97rem; }
+        .dict-id { font-size: .78rem; color: var(--text-muted); font-family: monospace; }
+        .dict-meta { font-size: .82rem; color: var(--text-muted); }
+        .dict-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .section-title { font-size: 1.1rem; font-weight: 700; }
+
+        .divider {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 20px 0;
+        }
+
+        .hint {
+            font-size: .82rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .link { color: var(--accent); text-decoration: none; }
+        .link:hover { text-decoration: underline; }
+
+        .empty-state {
+            text-align: center;
+            padding: 48px 20px;
+            color: var(--text-muted);
+        }
+        .empty-state .icon { font-size: 3rem; display: block; margin-bottom: 12px; }
+        .empty-state p { margin-bottom: 20px; }
+
+        .files-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        @media (max-width: 600px) {
+            .files-grid { grid-template-columns: 1fr; }
+        }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.6);
+            z-index: 999;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px 32px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: var(--shadow);
+        }
+        .modal-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 10px; }
+        .modal-text { font-size: .9rem; color: var(--text-muted); margin-bottom: 20px; }
+        .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+    </style>
+    {% block extra_style %}{% endblock %}
+</head>
+<body>
+    <nav>
+        <a class="nav-brand" href="{{ url_for('index') }}">
+            EasyDict <span class="tag">贡献者</span>
+        </a>
+        <div class="nav-spacer"></div>
+        {% if session.user_id %}
+            <span class="nav-user" id="navUser" onclick="toggleUserMenu()">
+                {{ session.username }}
+                <div class="nav-user-dropdown" id="userDropdown">
+                    <a href="{{ url_for('logout') }}">退出</a>
+                </div>
+            </span>
+        {% else %}
+            <a class="nav-link" href="{{ url_for('login') }}">登录</a>
+            <a class="nav-link" href="{{ url_for('register') }}">注册</a>
+        {% endif %}
+    </nav>
+
+    {% block content %}{% endblock %}
+
+    <!-- Delete confirmation modal -->
+    <div class="modal-overlay" id="deleteModal">
+        <div class="modal">
+            <div class="modal-title">确认删除</div>
+            <div class="modal-text" id="deleteModalText"></div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeDeleteModal()">取消</button>
+                <form id="deleteForm" method="post">
+                    <button type="submit" class="btn btn-danger">删除</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function toggleUserMenu() {
+        document.getElementById('navUser').classList.toggle('open');
+    }
+    document.addEventListener('click', function(e) {
+        var u = document.getElementById('navUser');
+        if (u && !u.contains(e.target)) u.classList.remove('open');
+    });
+
+    function confirmDelete(dictId, dictName) {
+        document.getElementById('deleteModalText').textContent =
+            `确定要删除词典 "${dictName}"（${dictId}）吗？此操作不可撤销，词典文件将被永久删除。`;
+        document.getElementById('deleteForm').action =
+            '/contributor/dicts/' + dictId + '/delete';
+        document.getElementById('deleteModal').classList.add('show');
+    }
+    function closeDeleteModal() {
+        document.getElementById('deleteModal').classList.remove('show');
+    }
+    document.getElementById('deleteModal').addEventListener('click', function(e) {
+        if (e.target === this) closeDeleteModal();
+    });
+
+    // Drag & drop on upload areas (generic fallback for areas without data-expected)
+    document.querySelectorAll('.upload-area:not([data-expected])').forEach(function(area) {
+        area.addEventListener('dragover', function(e) { e.preventDefault(); this.classList.add('drag-over'); });
+        area.addEventListener('dragleave', function() { this.classList.remove('drag-over'); });
+        area.addEventListener('drop', function(e) {
+            e.preventDefault(); this.classList.remove('drag-over');
+            var input = this.querySelector('input[type="file"]');
+            if (e.dataTransfer.files.length) {
+                input.files = e.dataTransfer.files;
+                input.dispatchEvent(new Event('change'));
+            }
+        });
+    });
+    </script>
+    {% block extra_script %}{% endblock %}
+</body>
+</html>

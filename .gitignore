@@ -1,0 +1,30 @@
+# 环境变量（包含本地路径和密钥，不能上传）
+docker/.env
+
+# 词典数据（用户自备，不随代码分发）
+dicts/
+
+# 运行时日志
+docker/logs/
+
+# 用户数据库（运行时生成）
+contributor_data/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Docker 数据目录（运行时生成）
+docker/data/
+
+# IDE / 编辑器配置
+.claude/
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db

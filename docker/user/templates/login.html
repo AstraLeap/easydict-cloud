@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}登录 - EasyDict 贡献者平台{% endblock %}
+
+{% block content %}
+<div class="center-box">
+    <div class="card">
+        <div class="card-title">登录</div>
+        <div class="card-sub">欢迎回来</div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="alerts">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <form method="post" action="{{ url_for('login') }}">
+            <div class="form-group">
+                <label for="identifier">用户名或邮箱</label>
+                <input type="text" id="identifier" name="identifier"
+                       placeholder="输入用户名或邮箱"
+                       value="{{ request.form.get('identifier', '') }}"
+                       autocomplete="username" required>
+            </div>
+            <div class="form-group">
+                <label for="password">密码</label>
+                <input type="password" id="password" name="password"
+                       placeholder="输入密码"
+                       autocomplete="current-password" required>
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">登录</button>
+        </form>
+
+        <hr class="divider">
+        <div style="text-align:center;font-size:.88rem;color:var(--text-muted)">
+            还没有账号？<a class="link" href="{{ url_for('register') }}">立即注册</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

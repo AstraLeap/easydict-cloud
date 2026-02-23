@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}
+    {% if action == 'edit' %}编辑词典{% else %}上传新词典{% endif %} - EasyDict 贡献者平台
+{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width:680px">
+
+    <div style="margin-bottom:20px">
+        <a class="link" href="{{ url_for('dashboard') }}">&larr; 返回控制台</a>
+    </div>
+
+    <div class="card">
+        <div class="card-title">
+            {% if action == 'edit' %}编辑词典{% else %}上传新词典{% endif %}
+        </div>
+        <div class="card-sub">
+            {% if action == 'edit' %}
+                替换需要更新的文件，留空则保留原文件
+            {% else %}
+                上传一个新的词典到 EasyDict
+            {% endif %}
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="alerts">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <form method="post" enctype="multipart/form-data"
+              action="{% if action == 'edit' %}{{ url_for('edit_dict', dict_id=dict.dict_id) }}{% else %}{{ url_for('new_dict') }}{% endif %}">
+
+            <div style="font-size:.9rem;font-weight:700;margin-bottom:14px">
+                词典文件
+                {% if action == 'edit' %}
+                <span style="font-weight:400;color:var(--text-muted)">（只上传需要替换的文件）</span>
+                {% endif %}
+            </div>
+
+            {% if action != 'edit' %}
+            <div class="alert alert-info" style="margin-bottom:16px;font-size:.82rem">
+                <div>
+                    词典 ID 将从 <code>metadata.json</code> 的 <code>id</code> 字段自动读取。<br>
+                    <strong>metadata.json 必须包含以下字段：</strong><br>
+                    <code style="font-size:.78rem;word-break:break-all">
+                        id, name, source_language, target_language
+                    </code>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="files-grid">
+                <!-- metadata.json -->
+                <div class="form-group">
+                    <label>
+                        metadata.json
+                        {% if action != 'edit' %}<span class="required-badge">必需</span>{% else %}<span class="optional-badge">可选</span>{% endif %}
+                    </label>
+                    <div class="upload-area" data-expected="metadata.json">
+                        <input type="file" name="metadata.json" accept=".json">
+                        <span class="upload-icon">📄</span>
+                        <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
+                        <div class="file-name"></div>
+                    </div>
+                    <div class="hint">词典元数据 JSON 文件</div>
+                </div>
+
+                <!-- dictionary.db -->
+                <div class="form-group">
+                    <label>
+                        dictionary.db
+                        {% if action != 'edit' %}<span class="required-badge">必需</span>{% else %}<span class="optional-badge">可选</span>{% endif %}
+                    </label>
+                    <div class="upload-area" data-expected="dictionary.db">
+                        <input type="file" name="dictionary.db" accept=".db">
+                        <span class="upload-icon">🗃️</span>
+                        <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
+                        <div class="file-name"></div>
+                    </div>
+                    <div class="hint">SQLite 词典数据库</div>
+                </div>
+
+                <!-- logo.png -->
+                <div class="form-group">
+                    <label>
+                        logo.png
+                        {% if action != 'edit' %}<span class="required-badge">必需</span>{% else %}<span class="optional-badge">可选</span>{% endif %}
+                    </label>
+                    <div class="upload-area" data-expected="logo.png">
+                        <input type="file" name="logo.png" accept="image/png">
+                        <span class="upload-icon">🖼️</span>
+                        <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
+                        <div class="file-name"></div>
+                    </div>
+                    <div class="hint">词典 Logo（PNG 格式）</div>
+                </div>
+
+                <!-- media.db -->
+                <div class="form-group">
+                    <label>
+                        media.db
+                        <span class="optional-badge">可选</span>
+                    </label>
+                    <div class="upload-area" data-expected="media.db">
+                        <input type="file" name="media.db" accept=".db">
+                        <span class="upload-icon">🎵</span>
+                        <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
+                        <div class="file-name"></div>
+                    </div>
+                    <div class="hint">音频/图片媒体数据库（可选）</div>
+                </div>
+            </div>
+
+            {% if action == 'edit' %}
+            <div class="form-group" style="margin-top:16px">
+                <label>更新说明 <span class="required-badge">必填</span></label>
+                <textarea name="update_message" rows="2"
+                          placeholder="简述本次更新的内容…"
+                          style="width:100%;resize:vertical;" required></textarea>
+            </div>
+            {% endif %}
+
+            <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:8px">
+                <a class="btn btn-outline" href="{{ url_for('dashboard') }}">取消</a>
+                <button type="submit" class="btn btn-primary" id="submitBtn">
+                    {% if action == 'edit' %}保存更新{% else %}上传词典{% endif %}
+                </button>
+            </div>
+
+        </form>
+    </div>
+</div>
+
+{% block extra_script %}
+<script>
+// Per-slot filename validation with visual feedback
+document.querySelectorAll('.upload-area[data-expected]').forEach(function(area) {
+    var expected = area.dataset.expected;
+    var input = area.querySelector('input[type="file"]');
+    var label = area.querySelector('.file-name');
+
+    input.addEventListener('change', function() {
+        if (!this.files.length) { label.textContent = ''; label.style.color = ''; return; }
+        var actual = this.files[0].name;
+        var size = (this.files[0].size / 1024 / 1024).toFixed(1);
+        if (actual !== expected) {
+            label.textContent = '✗ 文件名错误：应为 ' + expected;
+            label.style.color = 'var(--danger)';
+            area.style.borderColor = 'var(--danger)';
+        } else {
+            label.textContent = '✓ ' + actual + ' (' + size + ' MB)';
+            label.style.color = 'var(--success)';
+            area.style.borderColor = 'var(--success)';
+        }
+    });
+});
+
+// Block submit if any selected file has wrong name
+document.querySelector('form').addEventListener('submit', function(e) {
+    var bad = [];
+    document.querySelectorAll('.upload-area[data-expected]').forEach(function(area) {
+        var expected = area.dataset.expected;
+        var input = area.querySelector('input[type="file"]');
+        if (input.files.length && input.files[0].name !== expected) {
+            bad.push('"' + input.files[0].name + '" (应为 ' + expected + ')');
+        }
+    });
+    if (bad.length) {
+        e.preventDefault();
+        alert('文件名错误，请重新选择：\n' + bad.join('\n'));
+    }
+});
+</script>
+{% endblock %}
+{% endblock %}
