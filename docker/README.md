@@ -132,11 +132,12 @@ curl http://localhost:3070/word/oxford/hello
 |------|------|------|
 | GET | `/dictionaries` | 获取所有词典列表及统计信息 |
 | GET | `/word/{词典ID}/{单词}` | 查询单词，支持前缀匹配，最多返回 50 条 |
+| GET | `/entry/{词典ID}/{词条ID}` | 按词条 ID 精确查询单条词条 |
 | GET | `/audio/{词典ID}/{文件路径}` | 获取音频文件（mp3/wav/ogg） |
 | GET | `/image/{词典ID}/{文件路径}` | 获取图片文件（png/jpg/gif/webp） |
 | GET | `/auxi/{文件路径}` | 获取辅助数据文件（如 en.db） |
 
-**查询单词示例响应：**
+**查询单词示例响应（`entries` 为数据库原始 JSON，字段因词典而异）：**
 
 ```json
 {
@@ -144,11 +145,12 @@ curl http://localhost:3070/word/oxford/hello
   "word": "hello",
   "entries": [
     {
-      "id": "1",
+      "dict_id": "oxford",
+      "entry_id": "1",
       "headword": "hello",
       "entry_type": "word",
-      "pronunciations": [...],
-      "senses": [...]
+      "pronunciation": [...],
+      "sense_group": [...]
     }
   ],
   "total": 1
@@ -224,27 +226,44 @@ curl http://localhost:3070/word/oxford/hello
 
 ### 更新检查
 
-| 方法 | 路径 | 查询参数 | 说明 |
-|------|------|------|------|
-| GET | `/update/{词典ID}` | `from_ver=0&to_ver=N`（均可选） | 查询指定版本区间的变更记录，返回需要下载的文件列表 |
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/update` | 批量查询多本词典的更新信息 |
+
+查询参数格式：`{词典ID}={from_ver}` 或 `{词典ID}={from_ver}:{to_ver}`，每本词典一个参数，不指定 `to_ver` 则默认查询到最新版本。
+
+```
+/update?oxford=5&collins=0:10
+```
 
 **响应示例：**
 
 ```json
-{
-  "dict_id": "oxford",
-  "from": 2,
-  "to": 5,
-  "history": [
-    {"v": 3, "m": "更新发音"},
-    {"v": 5, "m": "新增词条"}
-  ],
-  "required": {
-    "files": ["dictionary.db", "metadata.json"],
-    "entries": [1024, 2048]
+[
+  {
+    "dict_id": "oxford",
+    "from": 5,
+    "to": 8,
+    "history": [
+      {"v": 6, "m": "更新发音"},
+      {"v": 8, "m": "新增词条"}
+    ],
+    "required": {
+      "files": ["dictionary.db", "metadata.json"],
+      "entries": [1024, 2048]
+    }
+  },
+  {
+    "dict_id": "collins",
+    "from": 0,
+    "to": 10,
+    "history": [...],
+    "required": {...}
   }
-}
+]
 ```
+
+词典不存在时该项返回 `{"dict_id": "...", "error": "not found"}`，不影响其他词典的查询结果。
 
 `required.files` 表示需要整体重新下载的文件，`required.entries` 表示可增量更新的词条 ID 列表（配合 `/download/{词典ID}/entries` 接口使用）。
 

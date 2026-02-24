@@ -490,6 +490,62 @@ async def create_dict(
 # upload.dict.dxde.de 专用路由（绕过 Cloudflare，用于大文件上传）
 
 
+@app.get("/update")
+async def get_updates_batch(request: Request):
+    """
+    批量查询多本词典的更新信息。
+
+    查询参数格式：{dict_id}={from_ver} 或 {dict_id}={from_ver}:{to_ver}，例如：
+      /update?ode_now=5&another_dict=0:10
+    不指定 to_ver 则默认查询到最新版本。
+    """
+    results = []
+    for dict_id, ver_str in request.query_params.items():
+        # 解析 from_ver 和可选的 to_ver
+        if ":" in ver_str:
+            parts = ver_str.split(":", 1)
+            try:
+                from_ver = int(parts[0])
+                to_ver: Optional[int] = int(parts[1])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid version range for '{dict_id}': '{ver_str}'")
+        else:
+            try:
+                from_ver = int(ver_str)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid version for '{dict_id}': '{ver_str}'")
+            to_ver = None
+
+        dict_path = dict_dir(dict_id)
+        if not dict_path.exists():
+            results.append({"dict_id": dict_id, "error": "not found"})
+            continue
+
+        if to_ver is None:
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT MAX(version) FROM version_history WHERE dict_id = ?",
+                    (dict_id,)
+                ).fetchone()
+            to_ver = row[0] if row and row[0] is not None else 0
+
+        history = _get_history_between(dict_id, from_ver, to_ver or 0)
+        required = _compute_required_files(dict_id, from_ver, to_ver or 0)
+
+        results.append({
+            "dict_id": dict_id,
+            "from": from_ver,
+            "to": to_ver,
+            "history": history,
+            "required": required,
+        })
+
+    return results
+
+
+# upload.dict.dxde.de 专用路由（绕过 Cloudflare，用于大文件上传）
+
+
 @app.post("/")
 async def upload_create_dict(request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
@@ -760,32 +816,6 @@ def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> dict[st
     return {
         "files": sorted(files_needed),
         "entries": list(entries_needed.keys()),
-    }
-
-
-@app.get("/update/{dict_id}")
-async def get_updates(dict_id: str, from_ver: int = 0, to_ver: Optional[int] = None):
-    dict_path = dict_dir(dict_id)
-    if not dict_path.exists():
-        raise HTTPException(status_code=404, detail=f"Dictionary '{dict_id}' not found")
-
-    if to_ver is None:
-        with get_db() as conn:
-            row = conn.execute(
-                "SELECT MAX(version) FROM version_history WHERE dict_id = ?",
-                (dict_id,)
-            ).fetchone()
-        to_ver = row[0] if row and row[0] is not None else 0
-
-    history = _get_history_between(dict_id, from_ver, to_ver or 0)
-    required = _compute_required_files(dict_id, from_ver, to_ver or 0)
-
-    return {
-        "dict_id": dict_id,
-        "from": from_ver,
-        "to": to_ver or 0,
-        "history": history,
-        "required": required,
     }
 
 
