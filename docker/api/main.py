@@ -78,34 +78,6 @@ _zip_file_count_cache: Dict[str, int] = {}
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
 
-class DictionaryEntry(BaseModel):
-    """词典条目模型"""
-    id: str
-    headword: str
-    entry_type: str
-    page: Optional[str] = None
-    section: Optional[str] = None
-    tags: List[str] = []
-    certifications: List[str] = []
-    frequency: Dict[str, Any] = {}
-    etymology: Optional[Any] = None
-    inflections: List[Dict[str, Any]] = []
-    pronunciations: List[Dict[str, Any]] = []
-    senses: List[Dict[str, Any]] = []
-    boards: List[Dict[str, Any]] = []
-    collocations: Optional[Dict[str, Any]] = None
-    phrases: Optional[Dict[str, Any]] = None
-    theasaruses: Optional[Dict[str, Any]] = None
-    senseGroups: List[Dict[str, Any]] = []
-
-
-class DictionaryResponse(BaseModel):
-    """词典查询响应模型"""
-    dict_id: str
-    word: str
-    entries: List[DictionaryEntry]
-    total: int
-
 
 class DictionaryFileInfo(BaseModel):
     """词典文件信息"""
@@ -647,31 +619,6 @@ def decompress_json_data(data: bytes, dctx: Optional[zstd.ZstdDecompressor]) -> 
         return {}
 
 
-async def row_to_entry(row: aiosqlite.Row, dict_id: str) -> DictionaryEntry:
-    """将数据库行转换为词典条目对象（支持 zstd 解压）"""
-    dctx = await get_zstd_decompressor(dict_id)
-    json_data = decompress_json_data(row['json_data'], dctx)
-
-    return DictionaryEntry(
-        id=str(row['entry_id']) if row['entry_id'] else '',
-        headword=row['headword'] or '',
-        entry_type=row['entry_type'] or 'word',
-        page=row['page'],
-        section=row['section'],
-        tags=json_data.get('tags') or [],
-        certifications=json_data.get('certifications') or [],
-        frequency=json_data.get('frequency') or {},
-        etymology=json_data.get('etymology'),
-        inflections=json_data.get('inflections') or [],
-        pronunciations=json_data.get('pronunciations') or [],
-        senses=json_data.get('senses') or [],
-        boards=json_data.get('boards') or [],
-        collocations=json_data.get('collocations'),
-        phrases=json_data.get('phrases'),
-        theasaruses=json_data.get('theasaruses'),
-        senseGroups=json_data.get('senseGroups') or []
-    )
-
 
 def get_directory_size(path: Path) -> int:
     """获取目录总大小"""
@@ -876,7 +823,7 @@ async def download_entries_batch(dict_id: str, data: EntryIdsRequest):
 
 
 
-@app.get("/word/{dict_id}/{word}", response_model=DictionaryResponse)
+@app.get("/word/{dict_id}/{word}")
 async def query_word(dict_id: str, word: str, request: Request):
     """查询单词接口"""
     logger.info(f"Querying word '{word}' in dictionary '{dict_id}'")
@@ -902,16 +849,44 @@ async def query_word(dict_id: str, word: str, request: Request):
         rows = await cursor.fetchall()
         await cursor.close()
 
-        entries = [await row_to_entry(row, dict_id) for row in rows]
+        dctx = await get_zstd_decompressor(dict_id)
+        entries = [decompress_json_data(row['json_data'], dctx) for row in rows]
 
-        return DictionaryResponse(
-            dict_id=dict_id,
-            word=word,
-            entries=entries,
-            total=len(entries)
-        )
+        return JSONResponse({
+            "dict_id": dict_id,
+            "word": word,
+            "entries": entries,
+            "total": len(entries)
+        })
     except Exception as e:
         logger.error(f"Error querying word '{word}': {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.get("/entry/{dict_id}/{entry_id}")
+async def query_entry(dict_id: str, entry_id: int):
+    """查询单个词条接口"""
+    conn = await get_db_connection(dict_id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail=f"Dictionary '{dict_id}' not found")
+
+    try:
+        cursor = await conn.execute(
+            "SELECT json_data FROM entries WHERE entry_id = ?",
+            (entry_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Entry '{entry_id}' not found")
+
+        dctx = await get_zstd_decompressor(dict_id)
+        return JSONResponse(decompress_json_data(row['json_data'], dctx))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error querying entry '{entry_id}': {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
