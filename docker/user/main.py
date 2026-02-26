@@ -369,7 +369,7 @@ async def get_me(user: dict = Depends(get_current_user)):
 
 # ============ Settings API ============
 
-@app.get("/settings")
+@app.get("/user/settings")
 async def download_settings(user: dict = Depends(get_current_user)):
     zip_path = get_settings_zip_path(user["id"])
     if not zip_path.exists():
@@ -381,7 +381,7 @@ async def download_settings(user: dict = Depends(get_current_user)):
     )
 
 
-@app.post("/settings")
+@app.post("/user/settings")
 async def upload_settings(user: dict = Depends(get_current_user), file: UploadFile = File(...)):
     if not file.filename or not file.filename.endswith('.zip'):
         raise HTTPException(status_code=400, detail="File must be a .zip file")
@@ -396,7 +396,7 @@ async def upload_settings(user: dict = Depends(get_current_user), file: UploadFi
     return {"success": True, "size": len(content), "updated_at": datetime.now(timezone.utc).isoformat()}
 
 
-@app.delete("/settings")
+@app.delete("/user/settings")
 async def delete_settings(user: dict = Depends(get_current_user)):
     zip_path = get_settings_zip_path(user["id"])
     if zip_path.exists():

@@ -592,14 +592,24 @@ async def get_zstd_decompressor(dict_id: str) -> Optional[zstd.ZstdDecompressor]
             zdict = zstd.ZstdCompressionDict(bytes(row[0]))
             dctx = zstd.ZstdDecompressor(dict_data=zdict)
             _zstd_decompressors[dict_id] = dctx
+            logger.info(f"Loaded zstd dict for '{dict_id}' ({len(bytes(row[0]))} bytes)")
+            return dctx
+        elif row is not None:
+            # config 表有记录但 value 为空，明确确认该字典无压缩字典
+            logger.info(f"Empty zstd_dict for '{dict_id}', using plain decompressor")
+            dctx = zstd.ZstdDecompressor()
+            _zstd_decompressors[dict_id] = dctx
+            return dctx
+        else:
+            # config 表中没有 zstd_dict 行，明确确认该字典无压缩字典
+            logger.info(f"No zstd_dict entry for '{dict_id}', using plain decompressor")
+            dctx = zstd.ZstdDecompressor()
+            _zstd_decompressors[dict_id] = dctx
             return dctx
     except Exception as e:
-        logger.warning(f"No zstd dict for '{dict_id}', falling back to plain decompressor: {e}")
-
-    # Fallback: no training dict
-    dctx = zstd.ZstdDecompressor()
-    _zstd_decompressors[dict_id] = dctx
-    return dctx
+        # 查询失败（如 DB 连接问题），不缓存，下次重试
+        logger.warning(f"Failed to load zstd dict for '{dict_id}', will retry next request: {e}")
+        return None
 
 
 def decompress_json_data(data: bytes, dctx: Optional[zstd.ZstdDecompressor]) -> Any:
@@ -611,11 +621,13 @@ def decompress_json_data(data: bytes, dctx: Optional[zstd.ZstdDecompressor]) -> 
     if dctx is not None:
         try:
             raw = dctx.decompress(raw)
-        except Exception:
+        except Exception as e:
+            logger.error(f"zstd decompression failed: {e}")
             pass  # Not compressed (or wrong dict) – use as-is
     try:
         return json.loads(raw)
-    except Exception:
+    except Exception as e:
+        logger.error(f"json.loads failed after decompression: {e}")
         return {}
 
 
@@ -763,7 +775,6 @@ async def download_file(dict_id: str, filename: str):
     return FileResponse(
         path=str(file_path),
         media_type=media_type,
-        filename=filename,
         headers={
             "Cache-Control": f"public, max-age={max_age}"
         }
@@ -1211,7 +1222,6 @@ async def get_auxiliary_file(filename: str):
     return FileResponse(
         path=str(file_path),
         media_type=media_type,
-        filename=filename,
         headers={
             "Cache-Control": "public, max-age=86400"  # 缓存1天
         }

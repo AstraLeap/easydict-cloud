@@ -191,9 +191,9 @@ curl http://localhost:3070/word/oxford/hello
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/settings` | 下载用户设置（返回 .zip 文件） |
-| POST | `/settings` | 上传用户设置（multipart，字段名 `file`，必须是 .zip） |
-| DELETE | `/settings` | 删除用户设置 |
+| GET | `/user/settings` | 下载用户设置（返回 .zip 文件） |
+| POST | `/user/settings` | 上传用户设置（multipart，字段名 `file`，必须是 .zip） |
+| DELETE | `/user/settings` | 删除用户设置 |
 
 ### 词典管理
 
