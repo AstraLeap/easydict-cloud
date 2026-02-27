@@ -763,13 +763,13 @@ async def upsert_dict_entries(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Update metadata.json version and updatedAt
+    # Update metadata.json version and updated_at
     metadata_path = dict_dir(dict_id) / "metadata.json"
     if metadata_path.exists():
         try:
             meta = parse_metadata(metadata_path)
             meta["version"] = ver
-            meta["updatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            meta["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
             metadata_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update metadata.json: {e}")
