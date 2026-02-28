@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir \
     email-validator \
     python-multipart \
     zstandard \
+    aiosqlite \
     jinja2
 
 COPY main.py .
