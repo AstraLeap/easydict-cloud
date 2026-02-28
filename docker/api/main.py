@@ -6,7 +6,6 @@ EasyDict API Service
 import os
 import json
 import logging
-import sqlite3
 import zipfile
 import time
 from pathlib import Path
@@ -244,20 +243,15 @@ async def get_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
         logger.error(f"Failed to connect to database {db_path}: {e}")
         return None
 
-
-async def get_db_connection_raw(dict_id: str) -> Optional[aiosqlite.Connection]:
-    """获取词典数据库连接（不带 row_factory，用于聚合查询）"""
-    db_path = DICTIONARIES_PATH / dict_id / "dictionary.db"
-
-    if not db_path.exists():
-        return None
-
     try:
         conn = await aiosqlite.connect(str(db_path))
+        conn.row_factory = aiosqlite.Row
+        _db_connections[cache_key] = conn
         return conn
     except Exception as e:
         logger.error(f"Failed to connect to database {db_path}: {e}")
         return None
+
 
 
 async def get_media_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
@@ -595,19 +589,16 @@ async def get_zstd_decompressor(dict_id: str) -> Optional[zstd.ZstdDecompressor]
             logger.info(f"Loaded zstd dict for '{dict_id}' ({len(bytes(row[0]))} bytes)")
             return dctx
         elif row is not None:
-            # config 表有记录但 value 为空，明确确认该字典无压缩字典
             logger.info(f"Empty zstd_dict for '{dict_id}', using plain decompressor")
             dctx = zstd.ZstdDecompressor()
             _zstd_decompressors[dict_id] = dctx
             return dctx
         else:
-            # config 表中没有 zstd_dict 行，明确确认该字典无压缩字典
             logger.info(f"No zstd_dict entry for '{dict_id}', using plain decompressor")
             dctx = zstd.ZstdDecompressor()
             _zstd_decompressors[dict_id] = dctx
             return dctx
     except Exception as e:
-        # 查询失败（如 DB 连接问题），不缓存，下次重试
         logger.warning(f"Failed to load zstd dict for '{dict_id}', will retry next request: {e}")
         return None
 
@@ -707,12 +698,12 @@ async def get_dictionary_info(dict_id: str) -> Optional[DictionaryInfo]:
     entry_count = 0
     if db_path.exists():
         try:
-            conn = await get_db_connection_raw(dict_id)
+            conn = await get_db_connection(dict_id)
             if conn:
                 cursor = await conn.execute("SELECT COUNT(DISTINCT headword) as count FROM entries")
                 row = await cursor.fetchone()
                 entry_count = row[0] if row else 0
-                await conn.close()
+                await cursor.close()
         except Exception as e:
             logger.warning(f"Failed to count entries for {dict_id}: {e}")
 
@@ -799,17 +790,20 @@ async def download_entries_batch(dict_id: str, data: EntryIdsRequest):
     if not data.entries:
         raise HTTPException(status_code=400, detail="No entries provided")
 
-    entry_ids_str = [str(eid) for eid in data.entries]
+    entry_ids = list(data.entries)
 
     dctx = await get_zstd_decompressor(dict_id)
 
-    conn = sqlite3.connect(str(db_path))
-    placeholders = ",".join("?" * len(entry_ids_str))
-    rows = conn.execute(
+    conn = await get_db_connection(dict_id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail=f"Dictionary '{dict_id}' not found")
+    placeholders = ",".join("?" * len(entry_ids))
+    cursor = await conn.execute(
         f"SELECT entry_id, json_data FROM entries WHERE entry_id IN ({placeholders})",
-        entry_ids_str
-    ).fetchall()
-    conn.close()
+        entry_ids
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
 
     if not rows:
         raise HTTPException(status_code=404, detail="No entries found")
@@ -848,13 +842,10 @@ async def query_word(dict_id: str, word: str, request: Request):
             """
             SELECT * FROM entries
             WHERE headword = ?
-               OR headword LIKE ?
-            ORDER BY
-                CASE WHEN headword = ? THEN 0 ELSE 1 END,
-                headword
+            ORDER BY headword
             LIMIT 50
             """,
-            (word, f"{word}%", word)
+            (word,)
         )
 
         rows = await cursor.fetchall()
@@ -1055,7 +1046,6 @@ async def get_audio_file(dict_id: str, file_path: str):
             if not conn:
                 raise HTTPException(status_code=500, detail="Failed to connect to media database")
 
-            # 查询音频文件
             cursor = await conn.execute(
                 "SELECT blob FROM audios WHERE name = ?",
                 (file_path,)
@@ -1066,12 +1056,10 @@ async def get_audio_file(dict_id: str, file_path: str):
             if not row:
                 raise HTTPException(status_code=404, detail=f"Audio file '{file_path}' not found in database")
 
-            # 获取 blob 数据
             blob_data = row[0]
 
-            # 创建流式生成器（不缓存文件内容，每次都从数据库读取）
             async def audio_iterator():
-                chunk_size = 65536  # 64KB
+                chunk_size = 65536
                 for i in range(0, len(blob_data), chunk_size):
                     yield blob_data[i:i + chunk_size]
 
@@ -1083,15 +1071,13 @@ async def get_audio_file(dict_id: str, file_path: str):
                 media_type=media_type,
                 headers={
                     "Content-Disposition": f'inline; filename="{file_path}"',
-                    "Cache-Control": "public, max-age=2592000"  # 缓存30天
+                    "Cache-Control": "public, max-age=2592000"
                 }
             )
-
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"[AUDIO] 从数据库读取失败: {e}")
-            # 继续尝试从目录读取
 
     # 兼容旧的目录结构
     logger.info(f"[AUDIO] 从目录读取: {file_path}")

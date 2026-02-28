@@ -14,11 +14,14 @@ import hashlib
 import secrets
 import zipfile
 import io
+import asyncio
 import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from contextlib import asynccontextmanager
 
+import aiosqlite
 import zstandard as zstd
 
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Form, Query
@@ -49,6 +52,9 @@ OPTIONAL_FILES = {"media.db"}
 ALLOWED_FILES = REQUIRED_FILES | OPTIONAL_FILES
 METADATA_REQUIRED_KEYS = {"id", "name", "source_language", "target_language"}
 
+# 全局 user.db 连接（在 lifespan 中初始化和关闭）
+_user_db_conn: Optional[aiosqlite.Connection] = None
+
 
 class UserRegister(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
@@ -67,50 +73,60 @@ class TokenResponse(BaseModel):
     user: dict
 
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_db() -> aiosqlite.Connection:
+    """返回全局 user.db 连接（在 lifespan 中初始化）"""
+    if _user_db_conn is None:
+        raise RuntimeError("Database connection not initialized")
+    return _user_db_conn
 
 
-def init_db():
-    with get_db() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                username    TEXT    NOT NULL UNIQUE,
-                email       TEXT    NOT NULL UNIQUE,
-                password    TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL
-            );
+async def init_db():
+    conn = get_db()
+    await conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            username    TEXT    NOT NULL UNIQUE,
+            email       TEXT    NOT NULL UNIQUE,
+            password    TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS dicts (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                dict_id     TEXT    NOT NULL UNIQUE,
-                user_id     INTEGER NOT NULL REFERENCES users(id),
-                name        TEXT    NOT NULL,
-                has_media   INTEGER NOT NULL DEFAULT 0,
-                created_at  TEXT    NOT NULL,
-                updated_at  TEXT    NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS dicts (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            dict_id     TEXT    NOT NULL UNIQUE,
+            user_id     INTEGER NOT NULL REFERENCES users(id),
+            name        TEXT    NOT NULL,
+            has_media   INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT    NOT NULL,
+            updated_at  TEXT    NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS version_history (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                dict_id     TEXT    NOT NULL REFERENCES dicts(dict_id),
-                version     INTEGER NOT NULL,
-                message     TEXT    NOT NULL,
-                change_type TEXT    NOT NULL,
-                file_name   TEXT    NOT NULL,
-                entry_id    TEXT,
-                created_at  TEXT    NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS version_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            dict_id     TEXT    NOT NULL REFERENCES dicts(dict_id),
+            version     INTEGER NOT NULL,
+            message     TEXT    NOT NULL,
+            change_type TEXT    NOT NULL,
+            file_name   TEXT    NOT NULL,
+            entry_id    TEXT,
+            created_at  TEXT    NOT NULL
+        );
 
-            CREATE INDEX IF NOT EXISTS idx_vh_dict_version
-                ON version_history(dict_id, version);
-        """)
+        CREATE INDEX IF NOT EXISTS idx_vh_dict_version
+            ON version_history(dict_id, version);
+    """)
+    await conn.commit()
 
 
-init_db()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _user_db_conn
+    _user_db_conn = await aiosqlite.connect(str(DB_PATH))
+    _user_db_conn.row_factory = aiosqlite.Row
+    await init_db()
+    yield
+    await _user_db_conn.close()
+    _user_db_conn = None
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -149,11 +165,13 @@ async def get_current_user(request: Request) -> dict:
     token = auth_header[7:]
     payload = verify_token(token)
     user_id = int(payload["sub"])
-    with get_db() as conn:
-        user = conn.execute(
-            "SELECT id, username, email, created_at FROM users WHERE id = ?",
-            (user_id,)
-        ).fetchone()
+    conn = get_db()
+    cursor = await conn.execute(
+        "SELECT id, username, email, created_at FROM users WHERE id = ?",
+        (user_id,)
+    )
+    user = await cursor.fetchone()
+    await cursor.close()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return dict(user)
@@ -217,9 +235,11 @@ def compress_entry(data: bytes, zdict_bytes: bytes | None) -> bytes:
     return cctx.compress(data)
 
 
-def upsert_entry_in_db(db_path: Path, entry_json: dict) -> str:
+def upsert_entry_in_db(db_path: Path, entry_json: dict, zdict_bytes: bytes | None = None) -> str:
+    """将单个词条 upsert 进 dictionary.db。zdict_bytes 可由调用方预先获取并传入，避免重复查询 config 表。"""
     entry_id = entry_json.get("entry_id")
-    zdict_bytes = _get_zstd_dict(db_path)
+    if entry_id is not None:
+        entry_id = int(entry_id)
     compressed = compress_entry(
         json.dumps(entry_json, ensure_ascii=False).encode("utf-8"), zdict_bytes
     )
@@ -230,18 +250,18 @@ def upsert_entry_in_db(db_path: Path, entry_json: dict) -> str:
         existing = None
         if entry_id is not None:
             row = conn.execute(
-                "SELECT entry_id FROM entries WHERE entry_id = ?", (str(entry_id),)
+                "SELECT entry_id FROM entries WHERE entry_id = ?", (entry_id,)
             ).fetchone()
             existing = row
         if existing:
-            conn.execute("UPDATE entries SET json_data = ? WHERE entry_id = ?", (compressed, str(entry_id)))
+            conn.execute("UPDATE entries SET json_data = ? WHERE entry_id = ?", (compressed, entry_id))
             conn.commit()
             return "updated"
         else:
             headword = str(entry_json.get("headword", ""))
             headword_normalized = _normalize_headword(headword)
             col_map = {
-                "entry_id": str(entry_id) if entry_id is not None else None,
+                "entry_id": entry_id,
                 "headword": headword or None,
                 "headword_normalized": headword_normalized or None,
                 "entry_type": str(entry_json.get("entry_type", "")) or None,
@@ -261,26 +281,29 @@ def upsert_entry_in_db(db_path: Path, entry_json: dict) -> str:
         conn.close()
 
 
-def next_version(dict_id: str) -> int:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT MAX(version) FROM version_history WHERE dict_id = ?", (dict_id,)
-        ).fetchone()
+async def next_version(dict_id: str) -> int:
+    conn = get_db()
+    cursor = await conn.execute(
+        "SELECT MAX(version) FROM version_history WHERE dict_id = ?", (dict_id,)
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
     return (row[0] or 0) + 1
 
 
-def record_version(dict_id: str, version: int, message: str, change_type: str, file_name: str, entry_id: int | None = None):
+async def record_version(dict_id: str, version: int, message: str, change_type: str, file_name: str, entry_id: int | None = None):
     now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        conn.execute(
-            """INSERT INTO version_history
-               (dict_id, version, message, change_type, file_name, entry_id, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
-            (dict_id, version, message, change_type, file_name, entry_id, now)
-        )
+    conn = get_db()
+    await conn.execute(
+        """INSERT INTO version_history
+           (dict_id, version, message, change_type, file_name, entry_id, created_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        (dict_id, version, message, change_type, file_name, entry_id, now)
+    )
+    await conn.commit()
 
 
-app = FastAPI(title="EasyDict User API", description="用户认证、设置同步和词典管理", version="1.0.0")
+app = FastAPI(title="EasyDict User API", description="用户认证、设置同步和词典管理", version="1.0.0", lifespan=lifespan)
 
 
 @app.exception_handler(RequestValidationError)
@@ -324,13 +347,17 @@ async def register(data: UserRegister):
         raise HTTPException(status_code=400, detail="Username must be 3-32 letters, numbers or underscores")
     now = datetime.now(timezone.utc).isoformat()
     hashed = hash_password(data.password)
+    conn = get_db()
     try:
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO users (username, email, password, created_at) VALUES (?,?,?,?)",
-                (data.username, data.email.lower(), hashed, now)
-            )
-            user_id = conn.execute("SELECT id FROM users WHERE username = ?", (data.username,)).fetchone()[0]
+        await conn.execute(
+            "INSERT INTO users (username, email, password, created_at) VALUES (?,?,?,?)",
+            (data.username, data.email.lower(), hashed, now)
+        )
+        await conn.commit()
+        user_cursor = await conn.execute("SELECT id FROM users WHERE username = ?", (data.username,))
+        user_row = await user_cursor.fetchone()
+        await user_cursor.close()
+        user_id = user_row[0]
     except sqlite3.IntegrityError as e:
         if "username" in str(e):
             raise HTTPException(status_code=400, detail="Username already exists")
@@ -347,11 +374,13 @@ async def register(data: UserRegister):
 
 @app.post("/user/login", response_model=TokenResponse)
 async def login(data: UserLogin):
-    with get_db() as conn:
-        user = conn.execute(
-            "SELECT * FROM users WHERE username = ? OR email = ?",
-            (data.identifier, data.identifier.lower())
-        ).fetchone()
+    conn = get_db()
+    login_cursor = await conn.execute(
+        "SELECT * FROM users WHERE username = ? OR email = ?",
+        (data.identifier, data.identifier.lower())
+    )
+    user = await login_cursor.fetchone()
+    await login_cursor.close()
     if not user or not verify_password(user["password"], data.password):
         raise HTTPException(status_code=401, detail="Invalid username/email or password")
     token = create_token(user["id"], user["username"])
@@ -408,11 +437,13 @@ async def delete_settings(user: dict = Depends(get_current_user)):
 
 @app.get("/user/dicts")
 async def list_dicts(user: dict = Depends(get_current_user)):
-    with get_db() as conn:
-        dicts = conn.execute(
-            "SELECT dict_id, name, has_media, created_at, updated_at FROM dicts WHERE user_id = ? ORDER BY updated_at DESC",
-            (user["id"],)
-        ).fetchall()
+    conn = get_db()
+    cursor = await conn.execute(
+        "SELECT dict_id, name, has_media, created_at, updated_at FROM dicts WHERE user_id = ? ORDER BY updated_at DESC",
+        (user["id"],)
+    )
+    dicts = await cursor.fetchall()
+    await cursor.close()
     return [{"dict_id": d["dict_id"], "name": d["name"], "has_media": bool(d["has_media"]), "created_at": d["created_at"], "updated_at": d["updated_at"]} for d in dicts]
 
 
@@ -450,8 +481,10 @@ async def create_dict(
     if not validate_dict_id(dict_id):
         raise HTTPException(status_code=400, detail="Invalid dict_id")
 
-    with get_db() as conn:
-        existing = conn.execute("SELECT id FROM dicts WHERE dict_id = ?", (dict_id,)).fetchone()
+    conn = get_db()
+    existing_cursor = await conn.execute("SELECT id FROM dicts WHERE dict_id = ?", (dict_id,))
+    existing = await existing_cursor.fetchone()
+    await existing_cursor.close()
     disk_exists = dict_id_exists(dict_id)
     if existing or disk_exists:
         raise HTTPException(status_code=400, detail="Dict ID already exists")
@@ -470,16 +503,16 @@ async def create_dict(
 
         display_name = (meta.get("name") or "").strip() or dict_id
         now = datetime.now(timezone.utc).isoformat()
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO dicts (dict_id, user_id, name, has_media, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-                (dict_id, user["id"], display_name, int(has_media), now, now)
-            )
-        ver = next_version(dict_id)
+        await conn.execute(
+            "INSERT INTO dicts (dict_id, user_id, name, has_media, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (dict_id, user["id"], display_name, int(has_media), now, now)
+        )
+        await conn.commit()
+        ver = await next_version(dict_id)
         for fname in ["metadata.json", "dictionary.db", "logo.png"]:
-            record_version(dict_id, ver, message, "file", fname)
+            await record_version(dict_id, ver, message, "file", fname)
         if has_media:
-            record_version(dict_id, ver, message, "file", "media.db")
+            await record_version(dict_id, ver, message, "file", "media.db")
 
         return {"success": True, "dict_id": dict_id, "name": display_name}
     except Exception as e:
@@ -522,15 +555,17 @@ async def get_updates_batch(request: Request):
             continue
 
         if to_ver is None:
-            with get_db() as conn:
-                row = conn.execute(
-                    "SELECT MAX(version) FROM version_history WHERE dict_id = ?",
-                    (dict_id,)
-                ).fetchone()
+            conn = get_db()
+            ver_cursor = await conn.execute(
+                "SELECT MAX(version) FROM version_history WHERE dict_id = ?",
+                (dict_id,)
+            )
+            row = await ver_cursor.fetchone()
+            await ver_cursor.close()
             to_ver = row[0] if row and row[0] is not None else 0
 
-        history = _get_history_between(dict_id, from_ver, to_ver or 0)
-        required = _compute_required_files(dict_id, from_ver, to_ver or 0)
+        history = await _get_history_between(dict_id, from_ver, to_ver or 0)
+        required = await _compute_required_files(dict_id, from_ver, to_ver or 0)
 
         results.append({
             "dict_id": dict_id,
@@ -610,15 +645,17 @@ async def upload_update_dict(dict_id: str, request: Request, user: dict = Depend
 
 @app.delete("/user/dicts/{dict_id}")
 async def delete_dict(dict_id: str, user: dict = Depends(get_current_user)):
-    with get_db() as conn:
-        d = conn.execute(
-            "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
-        ).fetchone()
+    conn = get_db()
+    d_cursor = await conn.execute(
+        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
+    )
+    d = await d_cursor.fetchone()
+    await d_cursor.close()
     if not d:
         raise HTTPException(status_code=404, detail="Dict not found")
     shutil.rmtree(dict_dir(dict_id), ignore_errors=True)
-    with get_db() as conn:
-        conn.execute("DELETE FROM dicts WHERE dict_id = ?", (dict_id,))
+    await conn.execute("DELETE FROM dicts WHERE dict_id = ?", (dict_id,))
+    await conn.commit()
     return {"success": True}
 
 
@@ -634,10 +671,12 @@ async def update_dict(
 ):
     t0 = time.time()
     logger.info(f"[update_dict] START dict_id={dict_id} user={user.get('id')}")
-    with get_db() as conn:
-        d = conn.execute(
-            "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
-        ).fetchone()
+    conn = get_db()
+    d_cursor = await conn.execute(
+        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
+    )
+    d = await d_cursor.fetchone()
+    await d_cursor.close()
     if not d:
         raise HTTPException(status_code=404, detail="Dict not found")
 
@@ -697,15 +736,15 @@ async def update_dict(
 
         now = datetime.now(timezone.utc).isoformat()
         display_name = display_name if "display_name" in dir() else d["name"]
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE dicts SET name=?, has_media=?, updated_at=? WHERE dict_id=?",
-                (display_name, int(has_media), now, dict_id)
-            )
+        await conn.execute(
+            "UPDATE dicts SET name=?, has_media=?, updated_at=? WHERE dict_id=?",
+            (display_name, int(has_media), now, dict_id)
+        )
+        await conn.commit()
 
-        ver = next_version(dict_id)
+        ver = await next_version(dict_id)
         for fname in updated_files:
-            record_version(dict_id, ver, message, "file", fname)
+            await record_version(dict_id, ver, message, "file", fname)
 
         logger.info(f"[update_dict] DONE dict_id={dict_id} updated_files={updated_files} total={time.time()-t0:.1f}s")
         return {"success": True, "dict_id": dict_id, "version": ver, "updated_files": updated_files}
@@ -722,10 +761,12 @@ async def upsert_dict_entries(
     file: UploadFile = File(...),
     message: str = Form("更新条目"),
 ):
-    with get_db() as conn:
-        d = conn.execute(
-            "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
-        ).fetchone()
+    conn = get_db()
+    d_cursor2 = await conn.execute(
+        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
+    )
+    d = await d_cursor2.fetchone()
+    await d_cursor2.close()
     if not d:
         raise HTTPException(status_code=404, detail="Dict not found")
 
@@ -745,7 +786,8 @@ async def upsert_dict_entries(
         raise HTTPException(status_code=400, detail=f"Failed to decompress file: {e}")
 
     try:
-        ver = next_version(dict_id)
+        ver = await next_version(dict_id)
+        entries = []
         for i, line in enumerate(decompressed.decode("utf-8").splitlines()):
             line = line.strip()
             if not line:
@@ -754,10 +796,21 @@ async def upsert_dict_entries(
                 entry = json.loads(line)
             except Exception:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON at line {i + 1}")
-            upsert_entry_in_db(db_path, entry)
+            entries.append(entry)
+
+        # upsert_entry_in_db 使用同步 sqlite3 操作外部 dictionary.db，放入线程池避免阻塞事件循环
+        # _get_zstd_dict 只调用一次，避免每条 entry 都重新连接 config 表
+        def _do_upserts():
+            zdict_bytes = _get_zstd_dict(db_path)
+            for entry in entries:
+                upsert_entry_in_db(db_path, entry, zdict_bytes)
+
+        await asyncio.to_thread(_do_upserts)
+
+        for entry in entries:
             eid = entry.get("entry_id")
             if eid is not None:
-                record_version(dict_id, ver, message, "entry", "dictionary.db", int(eid))
+                await record_version(dict_id, ver, message, "entry", "dictionary.db", int(eid))
     except HTTPException:
         raise
     except Exception as e:
@@ -779,38 +832,43 @@ async def upsert_dict_entries(
 
 # ============ Update API ============
 
-def _get_history_between(dict_id: str, from_ver: int, to_ver: int) -> list[dict]:
-    with get_db() as conn:
-        rows = conn.execute(
-            """SELECT DISTINCT version, message
-               FROM version_history
-               WHERE dict_id = ? AND version > ? AND version <= ?
-               ORDER BY version ASC""",
-            (dict_id, from_ver, to_ver)
-        ).fetchall()
-
+async def _get_history_between(dict_id: str, from_ver: int, to_ver: int) -> list[dict]:
+    conn = get_db()
+    cursor = await conn.execute(
+        """SELECT DISTINCT version, message
+           FROM version_history
+           WHERE dict_id = ? AND version > ? AND version <= ?
+           ORDER BY version ASC""",
+        (dict_id, from_ver, to_ver)
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
     return [{"v": r["version"], "m": r["message"]} for r in rows]
 
 
-def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> dict[str, list]:
-    with get_db() as conn:
-        rows = conn.execute(
-            """SELECT version, change_type, file_name, entry_id
-               FROM version_history
-               WHERE dict_id = ? AND version > ? AND version <= ?
-               ORDER BY version ASC""",
-            (dict_id, from_ver, to_ver)
-        ).fetchall()
+async def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> dict[str, list]:
+    conn = get_db()
+    cursor = await conn.execute(
+        """SELECT version, change_type, file_name, entry_id
+           FROM version_history
+           WHERE dict_id = ? AND version > ? AND version <= ?
+           ORDER BY version ASC""",
+        (dict_id, from_ver, to_ver)
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
 
     files_needed: set[str] = set()
     entries_needed: dict[int, None] = {}
+    db_file_updated = False
 
     for r in rows:
         if r["change_type"] == "file":
             files_needed.add(r["file_name"])
             if r["file_name"] == "dictionary.db":
+                db_file_updated = True
                 entries_needed.clear()
-        elif r["change_type"] == "entry":
+        elif r["change_type"] == "entry" and not db_file_updated:
             entries_needed[int(r["entry_id"])] = None
 
     return {
