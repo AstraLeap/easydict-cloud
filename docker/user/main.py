@@ -808,7 +808,8 @@ async def upsert_dict_entries(
 
     try:
         ver = await next_version(dict_id)
-        entries = []
+        upsert_entries = []
+        delete_entry_ids = []
         for i, line in enumerate(decompressed.decode("utf-8").splitlines()):
             line = line.strip()
             if not line:
@@ -817,19 +818,39 @@ async def upsert_dict_entries(
                 entry = json.loads(line)
             except Exception:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON at line {i + 1}")
-            entries.append(entry)
+            if entry.get("_delete"):
+                eid = entry.get("entry_id")
+                if eid is None:
+                    raise HTTPException(status_code=400, detail=f"Missing entry_id for _delete entry at line {i + 1}")
+                delete_entry_ids.append(int(eid))
+            else:
+                upsert_entries.append(entry)
 
-        # upsert_entry_in_db 使用同步 sqlite3 操作外部 dictionary.db，放入线程池避免阻塞事件循环
-        # _get_zstd_dict 只调用一次，避免每条 entry 都重新连接 config 表
-        def _do_upserts():
-            zdict_bytes = _get_zstd_dict(db_path)
-            for entry in entries:
-                upsert_entry_in_db(db_path, entry, zdict_bytes)
+        # 同步 sqlite3 操作放入线程池避免阻塞事件循环
+        def _do_writes():
+            if delete_entry_ids:
+                db_conn = sqlite3.connect(str(db_path))
+                try:
+                    placeholders = ",".join("?" * len(delete_entry_ids))
+                    db_conn.execute(
+                        f"DELETE FROM entries WHERE entry_id IN ({placeholders})",
+                        delete_entry_ids,
+                    )
+                    db_conn.commit()
+                finally:
+                    db_conn.close()
+            if upsert_entries:
+                # _get_zstd_dict 只调用一次，避免每条 entry 都重新连接 config 表
+                zdict_bytes = _get_zstd_dict(db_path)
+                for entry in upsert_entries:
+                    upsert_entry_in_db(db_path, entry, zdict_bytes)
 
-        await asyncio.to_thread(_do_upserts)
+        await asyncio.to_thread(_do_writes)
         await invalidate_api_dict_cache(dict_id)
 
-        for entry in entries:
+        for eid in delete_entry_ids:
+            await record_version(dict_id, ver, message, "delete", "dictionary.db", eid)
+        for entry in upsert_entries:
             eid = entry.get("entry_id")
             if eid is not None:
                 await record_version(dict_id, ver, message, "entry", "dictionary.db", int(eid))
@@ -852,70 +873,7 @@ async def upsert_dict_entries(
     return {"success": True, "version": ver}
 
 
-class DeleteEntriesRequest(BaseModel):
-    entries: list[int]
-
-
-@app.delete("/user/dicts/{dict_id}/entries")
-async def delete_dict_entries(
-    dict_id: str,
-    body: DeleteEntriesRequest,
-    user: dict = Depends(get_current_user),
-    message: str = Query("删除条目"),
-):
-    conn = get_db()
-    d_cursor = await conn.execute(
-        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
-    )
-    d = await d_cursor.fetchone()
-    await d_cursor.close()
-    if not d:
-        raise HTTPException(status_code=404, detail="Dict not found")
-
-    db_path = dict_dir(dict_id) / "dictionary.db"
-    if not db_path.exists():
-        raise HTTPException(status_code=400, detail="dictionary.db not found")
-
-    entry_ids = body.entries
-    if not entry_ids:
-        raise HTTPException(status_code=400, detail="No entry IDs provided")
-
-    try:
-        def _do_deletes():
-            db_conn = sqlite3.connect(str(db_path))
-            try:
-                placeholders = ",".join("?" * len(entry_ids))
-                db_conn.execute(
-                    f"DELETE FROM entries WHERE entry_id IN ({placeholders})",
-                    entry_ids,
-                )
-                db_conn.commit()
-            finally:
-                db_conn.close()
-
-        await asyncio.to_thread(_do_deletes)
-        await invalidate_api_dict_cache(dict_id)
-
-        ver = await next_version(dict_id)
-        for eid in entry_ids:
-            await record_version(dict_id, ver, message, "delete", "dictionary.db", eid)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # Update metadata.json version and updated_at
-    metadata_path = dict_dir(dict_id) / "metadata.json"
-    if metadata_path.exists():
-        try:
-            meta = parse_metadata(metadata_path)
-            meta["version"] = ver
-            meta["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
-            metadata_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to update metadata.json: {e}")
-
-    return {"success": True, "version": ver, "deleted": len(entry_ids)}
+# ============ Update API ============
 
 async def _get_history_between(dict_id: str, from_ver: int, to_ver: int) -> list[dict]:
     conn = get_db()

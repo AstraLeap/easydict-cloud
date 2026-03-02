@@ -203,7 +203,7 @@ curl http://localhost:3070/word/oxford/hello
 | POST | `/user/dicts` | 上传新词典（multipart，见下方说明） |
 | POST | `/user/dicts/{词典ID}` | 更新已有词典（multipart，各文件字段均为可选） |
 | DELETE | `/user/dicts/{词典ID}` | 删除词典 |
-| POST | `/user/dicts/{词典ID}/entries` | 增量更新词条，上传 `.zst` 压缩的 JSONL 文件，每行一个词条 JSON |
+| POST | `/user/dicts/{词典ID}/entries` | 增量更新词条，上传 `.zst` 压缩的 JSONL 文件，支持 upsert 和删除（见下方说明） |
 
 **上传新词典（multipart 字段）：**
 
@@ -214,6 +214,28 @@ curl http://localhost:3070/word/oxford/hello
 | `logo_file` | 是 | `logo.png` 词典图标 |
 | `media_file` | 否 | `media.db` 媒体数据库（音频/图片） |
 | `message` | 否 | 版本说明（默认"初始上传"） |
+
+**增量更新词条（`POST /user/dicts/{词典ID}/entries`）：**
+
+请求为 multipart/form-data，字段：
+
+| 字段名 | 必填 | 说明 |
+|--------|------|------|
+| `file` | 是 | `.zst` 压缩文件，解压后为 JSONL，每行一条操作 |
+| `message` | 否 | 版本说明（默认"更新条目"） |
+
+JSONL 每行可以是 **upsert** 或 **删除** 操作，两种操作可混在同一文件中：
+
+```jsonl
+{"entry_id": 999, "headword": "apple", "entry_type": "word", ...}
+{"entry_id": 23413, "_delete": true}
+{"entry_id": 1423, "_delete": true}
+```
+
+- **upsert**：完整词条 JSON，有 `entry_id` 则更新，无则插入
+- **删除**：仅需 `{"entry_id": <id>, "_delete": true}`
+
+返回：`{"success": true, "version": 42}`
 
 ### 词典上传（大文件，upload 子域名专用）
 
@@ -250,7 +272,8 @@ curl http://localhost:3070/word/oxford/hello
     ],
     "required": {
       "files": ["dictionary.db", "metadata.json"],
-      "entries": [1024, 2048]
+      "entries": [1024, 2048],
+      "deleted_entries": [512]
     }
   },
   {
@@ -265,7 +288,7 @@ curl http://localhost:3070/word/oxford/hello
 
 词典不存在时该项返回 `{"dict_id": "...", "error": "not found"}`，不影响其他词典的查询结果。
 
-`required.files` 表示需要整体重新下载的文件，`required.entries` 表示可增量更新的词条 ID 列表（配合 `/download/{词典ID}/entries` 接口使用）。
+`required.files` 表示需要整体重新下载的文件，`required.entries` 表示可增量 upsert 的词条 ID 列表，`required.deleted_entries` 表示需要从本地删除的词条 ID 列表（配合 `/download/{词典ID}/entries` 接口使用）。
 
 ## 环境变量说明
 
