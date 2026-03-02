@@ -852,7 +852,70 @@ async def upsert_dict_entries(
     return {"success": True, "version": ver}
 
 
-# ============ Update API ============
+class DeleteEntriesRequest(BaseModel):
+    entries: list[int]
+
+
+@app.delete("/user/dicts/{dict_id}/entries")
+async def delete_dict_entries(
+    dict_id: str,
+    body: DeleteEntriesRequest,
+    user: dict = Depends(get_current_user),
+    message: str = Query("删除条目"),
+):
+    conn = get_db()
+    d_cursor = await conn.execute(
+        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
+    )
+    d = await d_cursor.fetchone()
+    await d_cursor.close()
+    if not d:
+        raise HTTPException(status_code=404, detail="Dict not found")
+
+    db_path = dict_dir(dict_id) / "dictionary.db"
+    if not db_path.exists():
+        raise HTTPException(status_code=400, detail="dictionary.db not found")
+
+    entry_ids = body.entries
+    if not entry_ids:
+        raise HTTPException(status_code=400, detail="No entry IDs provided")
+
+    try:
+        def _do_deletes():
+            db_conn = sqlite3.connect(str(db_path))
+            try:
+                placeholders = ",".join("?" * len(entry_ids))
+                db_conn.execute(
+                    f"DELETE FROM entries WHERE entry_id IN ({placeholders})",
+                    entry_ids,
+                )
+                db_conn.commit()
+            finally:
+                db_conn.close()
+
+        await asyncio.to_thread(_do_deletes)
+        await invalidate_api_dict_cache(dict_id)
+
+        ver = await next_version(dict_id)
+        for eid in entry_ids:
+            await record_version(dict_id, ver, message, "delete", "dictionary.db", eid)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Update metadata.json version and updated_at
+    metadata_path = dict_dir(dict_id) / "metadata.json"
+    if metadata_path.exists():
+        try:
+            meta = parse_metadata(metadata_path)
+            meta["version"] = ver
+            meta["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+            metadata_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update metadata.json: {e}")
+
+    return {"success": True, "version": ver, "deleted": len(entry_ids)}
 
 async def _get_history_between(dict_id: str, from_ver: int, to_ver: int) -> list[dict]:
     conn = get_db()
@@ -882,6 +945,7 @@ async def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> d
 
     files_needed: set[str] = set()
     entries_needed: dict[int, None] = {}
+    entries_deleted: dict[int, None] = {}
     db_file_updated = False
 
     for r in rows:
@@ -890,12 +954,22 @@ async def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> d
             if r["file_name"] == "dictionary.db":
                 db_file_updated = True
                 entries_needed.clear()
+                entries_deleted.clear()
         elif r["change_type"] == "entry" and not db_file_updated:
-            entries_needed[int(r["entry_id"])] = None
+            eid = int(r["entry_id"])
+            entries_needed[eid] = None
+            # 如果之前记录为删除，现在又被 upsert，则从删除列表移除
+            entries_deleted.pop(eid, None)
+        elif r["change_type"] == "delete" and not db_file_updated:
+            eid = int(r["entry_id"])
+            entries_deleted[eid] = None
+            # 如果之前记录为需要更新，现在又被删除，则从更新列表移除
+            entries_needed.pop(eid, None)
 
     return {
         "files": sorted(files_needed),
         "entries": list(entries_needed.keys()),
+        "deleted_entries": list(entries_deleted.keys()),
     }
 
 
