@@ -47,7 +47,22 @@ SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 
+# api 服务地址（同一 docker network 内）
+API_INTERNAL_URL = os.environ.get("API_INTERNAL_URL", "http://api:8080")
+
 REQUIRED_FILES = {"metadata.json", "dictionary.db", "logo.png"}
+
+
+async def invalidate_api_dict_cache(dict_id: str) -> None:
+    """通知 api 服务清除指定词典的连接缓存，在替换 dictionary.db 后调用"""
+    import urllib.request
+    url = f"{API_INTERNAL_URL}/internal/cache/{dict_id}"
+    try:
+        req = urllib.request.Request(url, method="DELETE")
+        await asyncio.to_thread(urllib.request.urlopen, req, None, 5)
+        logger.info(f"[cache] api cache invalidated for '{dict_id}'")
+    except Exception as e:
+        logger.warning(f"[cache] failed to invalidate api cache for '{dict_id}': {e}")
 OPTIONAL_FILES = {"media.db"}
 ALLOWED_FILES = REQUIRED_FILES | OPTIONAL_FILES
 METADATA_REQUIRED_KEYS = {"id", "name", "source_language", "target_language"}
@@ -501,6 +516,8 @@ async def create_dict(
             (target_dir / "media.db").write_bytes(await media_file.read())
             has_media = True
 
+        await invalidate_api_dict_cache(dict_id)
+
         display_name = (meta.get("name") or "").strip() or dict_id
         now = datetime.now(timezone.utc).isoformat()
         await conn.execute(
@@ -734,6 +751,10 @@ async def update_dict(
         if not updated_files:
             raise HTTPException(status_code=400, detail="No files provided for update")
 
+        # dictionary.db 或 media.db 有更新时，统一刷新 api 服务的连接缓存
+        if "dictionary.db" in updated_files or "media.db" in updated_files:
+            await invalidate_api_dict_cache(dict_id)
+
         now = datetime.now(timezone.utc).isoformat()
         display_name = display_name if "display_name" in dir() else d["name"]
         await conn.execute(
@@ -806,6 +827,7 @@ async def upsert_dict_entries(
                 upsert_entry_in_db(db_path, entry, zdict_bytes)
 
         await asyncio.to_thread(_do_upserts)
+        await invalidate_api_dict_cache(dict_id)
 
         for entry in entries:
             eid = entry.get("entry_id")

@@ -243,15 +243,6 @@ async def get_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
         logger.error(f"Failed to connect to database {db_path}: {e}")
         return None
 
-    try:
-        conn = await aiosqlite.connect(str(db_path))
-        conn.row_factory = aiosqlite.Row
-        _db_connections[cache_key] = conn
-        return conn
-    except Exception as e:
-        logger.error(f"Failed to connect to database {db_path}: {e}")
-        return None
-
 
 
 async def get_media_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
@@ -890,6 +881,35 @@ async def query_entry(dict_id: str, entry_id: int):
     except Exception as e:
         logger.error(f"Error querying entry '{entry_id}': {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.delete("/internal/cache/{dict_id}")
+async def invalidate_dict_cache(dict_id: str):
+    """清除指定词典的所有连接缓存和解压器缓存（供 user 服务在更新 dictionary.db / media.db 后调用）"""
+    closed_db = False
+    if dict_id in _db_connections:
+        try:
+            await _db_connections[dict_id].close()
+        except Exception:
+            pass
+        del _db_connections[dict_id]
+        closed_db = True
+
+    closed_media = False
+    media_key = f"media_{dict_id}"
+    if media_key in _media_db_connections:
+        try:
+            await _media_db_connections[media_key].close()
+        except Exception:
+            pass
+        del _media_db_connections[media_key]
+        closed_media = True
+
+    if dict_id in _zstd_decompressors:
+        del _zstd_decompressors[dict_id]
+
+    logger.info(f"Cache invalidated for '{dict_id}' (db={closed_db}, media={closed_media})")
+    return {"invalidated": dict_id}
 
 
 @app.get("/dictionaries")
