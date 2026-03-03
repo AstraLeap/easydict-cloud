@@ -62,8 +62,8 @@ API_INTERNAL_URL = os.environ.get("API_INTERNAL_URL", "http://api:8080")
 # File size limits (configurable via environment variables)
 MAX_SETTINGS_FILE_SIZE = int(os.environ.get("MAX_SETTINGS_FILE_SIZE", 10 * 1024 * 1024))  # 10MB
 MAX_METADATA_FILE_SIZE = int(os.environ.get("MAX_METADATA_FILE_SIZE", 5 * 1024 * 1024))  # 5MB
-MAX_DICTIONARY_FILE_SIZE = int(os.environ.get("MAX_DICTIONARY_FILE_SIZE", 500 * 1024 * 1024))  # 500MB
-MAX_MEDIA_FILE_SIZE = int(os.environ.get("MAX_MEDIA_FILE_SIZE", 2 * 1024 * 1024 * 1024))  # 2GB
+MAX_DICTIONARY_FILE_SIZE = int(os.environ.get("MAX_DICTIONARY_FILE_SIZE", 2 * 1024 * 1024 * 1024))  # 2GB
+MAX_MEDIA_FILE_SIZE = int(os.environ.get("MAX_MEDIA_FILE_SIZE", 4 * 1024 * 1024 * 1024))  # 4GB
 MAX_ENTRIES_FILE_SIZE = int(os.environ.get("MAX_ENTRIES_FILE_SIZE", 500 * 1024 * 1024))  # 500MB (compressed)
 
 REQUIRED_FILES = {"metadata.json", "dictionary.db", "logo.png"}
