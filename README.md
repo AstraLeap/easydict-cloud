@@ -69,6 +69,14 @@ AUXILIARY_PATH=/data/auxiliary
 JWT_SECRET=your_random_secret_here
 ```
 
+或在启动 docker-compose 时指定：
+
+```bash
+DICTIONARIES_PATH=/path/to/dictionaries AUXILIARY_PATH=/path/to/auxiliary docker-compose up -d
+```
+
+> 💡 **重要**：`DICTIONARIES_PATH` 必须指向包含词典文件的目录。如果目录为空，`/dictionaries` API 端点会返回空列表。
+
 ### 3. 准备词典数据
 
 在 `DICTIONARIES_PATH` 目录下按以下结构放置词典数据：
