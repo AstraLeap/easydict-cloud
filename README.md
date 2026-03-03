@@ -39,6 +39,10 @@ EasyDict 词典服务的 Docker 部署方案，提供词典查询、词典分发
 - Docker >= 20.10
 - Docker Compose >= 2.0（或 docker-compose >= 1.29）
 
+### 欢迎页面
+
+访问根路径 `/` 可以看到一个友好的 HTML 欢迎页面，包含一个可爱的 SVG 小猫和 API 使用提示。这个页面提醒用户这是一个 API 服务，而非网页应用。
+
 ### 1. 克隆仓库
 
 ```bash
