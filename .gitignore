@@ -1,12 +1,11 @@
 # 环境变量（包含本地路径和密钥，不能上传）
-docker/.env
+.env
 
 # 词典数据（用户自备，不随代码分发）
 dicts/
-auxi/
 
 # 运行时日志
-docker/logs/
+logs/
 
 # 用户数据库（运行时生成）
 contributor_data/
@@ -19,7 +18,7 @@ __pycache__/
 .Python
 
 # Docker 数据目录（运行时生成）
-docker/data/
+data/
 
 # IDE / 编辑器配置
 .claude/
