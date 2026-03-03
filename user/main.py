@@ -44,11 +44,25 @@ DICTS_PATH = Path(os.environ.get("DICTIONARIES_PATH", "/data/dictionaries"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
 
-JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
+# JWT_SECRET must be set in environment for security
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "ERROR: JWT_SECRET environment variable is required for security.\n"
+        "Please set JWT_SECRET to a long random string before starting the service.\n"
+        "Example: JWT_SECRET=$(python -c 'import secrets; print(secrets.token_hex(32))')"
+    )
 JWT_ALGORITHM = "HS256"
 
 # api 服务地址（同一 docker network 内）
 API_INTERNAL_URL = os.environ.get("API_INTERNAL_URL", "http://api:8080")
+
+# File size limits (configurable via environment variables)
+MAX_SETTINGS_FILE_SIZE = int(os.environ.get("MAX_SETTINGS_FILE_SIZE", 10 * 1024 * 1024))  # 10MB
+MAX_METADATA_FILE_SIZE = int(os.environ.get("MAX_METADATA_FILE_SIZE", 5 * 1024 * 1024))  # 5MB
+MAX_DICTIONARY_FILE_SIZE = int(os.environ.get("MAX_DICTIONARY_FILE_SIZE", 500 * 1024 * 1024))  # 500MB
+MAX_MEDIA_FILE_SIZE = int(os.environ.get("MAX_MEDIA_FILE_SIZE", 2 * 1024 * 1024 * 1024))  # 2GB
+MAX_ENTRIES_FILE_SIZE = int(os.environ.get("MAX_ENTRIES_FILE_SIZE", 500 * 1024 * 1024))  # 500MB (compressed)
 
 REQUIRED_FILES = {"metadata.json", "dictionary.db", "logo.png"}
 
@@ -212,7 +226,8 @@ def parse_metadata(path: Path) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception as e:
+        logger.error(f"Failed to parse metadata.json: {e}")
         return {}
 
 
@@ -237,7 +252,8 @@ def _get_zstd_dict(db_path: Path) -> bytes | None:
         row = conn.execute("SELECT value FROM config WHERE key = 'zstd_dict'").fetchone()
         conn.close()
         return bytes(row[0]) if row and row[0] else None
-    except:
+    except Exception as e:
+        logger.error(f"Failed to get zstd dictionary from {db_path}: {e}")
         return None
 
 
@@ -429,8 +445,18 @@ async def download_settings(user: dict = Depends(get_current_user)):
 async def upload_settings(user: dict = Depends(get_current_user), file: UploadFile = File(...)):
     if not file.filename or not file.filename.endswith('.zip'):
         raise HTTPException(status_code=400, detail="File must be a .zip file")
+    
+    # Validate file size
+    if file.size is not None and file.size > MAX_SETTINGS_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Settings file too large (max {MAX_SETTINGS_FILE_SIZE / 1024 / 1024:.0f}MB)")
+    
     zip_path = get_settings_zip_path(user["id"])
     content = await file.read()
+    
+    # Additional size check on actual content
+    if len(content) > MAX_SETTINGS_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Settings file too large (max {MAX_SETTINGS_FILE_SIZE / 1024 / 1024:.0f}MB)")
+    
     try:
         with zipfile.ZipFile(io.BytesIO(content), 'r') as zf:
             zf.testzip()
@@ -477,11 +503,27 @@ async def create_dict(
             errors.append(f"缺少必需文件")
     if errors:
         raise HTTPException(status_code=400, detail=errors)
+    
+    # Validate file sizes
+    if metadata_file.size is not None and metadata_file.size > MAX_METADATA_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
+    if dictionary_file.size is not None and dictionary_file.size > MAX_DICTIONARY_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
+    if logo_file.size is not None and logo_file.size > MAX_METADATA_FILE_SIZE:  # Logo should be small
+        raise HTTPException(status_code=413, detail="Logo file too large")
+    if media_file and media_file.filename and media_file.size is not None and media_file.size > MAX_MEDIA_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
 
     try:
         meta_content = await metadata_file.read()
+        # Additional size check on actual content
+        if len(meta_content) > MAX_METADATA_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
         meta = json.loads(meta_content.decode("utf-8"))
-    except:
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to parse metadata.json: {e}")
         raise HTTPException(status_code=400, detail="Invalid metadata.json")
 
     missing = validate_metadata_keys(meta)
@@ -510,10 +552,22 @@ async def create_dict(
 
     try:
         (target_dir / "metadata.json").write_bytes(meta_content)
-        (target_dir / "dictionary.db").write_bytes(await dictionary_file.read())
-        (target_dir / "logo.png").write_bytes(await logo_file.read())
+        
+        dictionary_data = await dictionary_file.read()
+        if len(dictionary_data) > MAX_DICTIONARY_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
+        (target_dir / "dictionary.db").write_bytes(dictionary_data)
+        
+        logo_data = await logo_file.read()
+        if len(logo_data) > MAX_METADATA_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="Logo file too large")
+        (target_dir / "logo.png").write_bytes(logo_data)
+        
         if media_file and media_file.filename:
-            (target_dir / "media.db").write_bytes(await media_file.read())
+            media_data = await media_file.read()
+            if len(media_data) > MAX_MEDIA_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
+            (target_dir / "media.db").write_bytes(media_data)
             has_media = True
 
         await invalidate_api_dict_cache(dict_id)
@@ -709,6 +763,9 @@ async def update_dict(
         if metadata_file and metadata_file.filename:
             logger.info(f"[update_dict] reading metadata_file elapsed={time.time()-t0:.1f}s")
             meta_content = await metadata_file.read()
+            # Validate file size
+            if len(meta_content) > MAX_METADATA_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
             logger.info(f"[update_dict] metadata_file read done size={len(meta_content)} elapsed={time.time()-t0:.1f}s")
             meta = json.loads(meta_content.decode("utf-8"))
             missing = validate_metadata_keys(meta)
@@ -727,6 +784,9 @@ async def update_dict(
         if dictionary_file and dictionary_file.filename:
             logger.info(f"[update_dict] reading dictionary_file elapsed={time.time()-t0:.1f}s")
             data = await dictionary_file.read()
+            # Validate file size
+            if len(data) > MAX_DICTIONARY_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
             logger.info(f"[update_dict] dictionary_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
             (target_dir / "dictionary.db").write_bytes(data)
             logger.info(f"[update_dict] dictionary_file write done elapsed={time.time()-t0:.1f}s")
@@ -735,6 +795,9 @@ async def update_dict(
         if logo_file and logo_file.filename:
             logger.info(f"[update_dict] reading logo_file elapsed={time.time()-t0:.1f}s")
             data = await logo_file.read()
+            # Validate file size
+            if len(data) > MAX_METADATA_FILE_SIZE:
+                raise HTTPException(status_code=413, detail="Logo file too large")
             logger.info(f"[update_dict] logo_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
             (target_dir / "logo.png").write_bytes(data)
             updated_files.append("logo.png")
@@ -742,6 +805,9 @@ async def update_dict(
         if media_file and media_file.filename:
             logger.info(f"[update_dict] reading media_file elapsed={time.time()-t0:.1f}s")
             data = await media_file.read()
+            # Validate file size
+            if len(data) > MAX_MEDIA_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
             logger.info(f"[update_dict] media_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
             (target_dir / "media.db").write_bytes(data)
             logger.info(f"[update_dict] media_file write done elapsed={time.time()-t0:.1f}s")
@@ -799,10 +865,19 @@ async def upsert_dict_entries(
         raise HTTPException(status_code=400, detail="File must be a .zst file")
 
     content = await file.read()
+    
+    # Validate compressed file size
+    if len(content) > MAX_ENTRIES_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Entries file too large (max {MAX_ENTRIES_FILE_SIZE / 1024 / 1024:.0f}MB)")
 
     dctx = zstd.ZstdDecompressor()
     try:
         decompressed = dctx.decompress(content)
+        # Validate decompressed size (limit to prevent zip bomb attacks)
+        if len(decompressed) > MAX_DICTIONARY_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="Decompressed entries data too large")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to decompress file: {e}")
 

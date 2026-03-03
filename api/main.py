@@ -193,8 +193,8 @@ async def lifespan(app: FastAPI):
     for zf in _zip_file_cache.values():
         try:
             zf.close()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to close ZipFile: {e}")
     # 清理 ZIP 缓存
     _zip_file_cache.clear()
     _zip_index_cache.clear()
@@ -479,8 +479,8 @@ async def get_zip_index(zip_path: Path) -> Dict[str, str]:
             # 关闭旧的 ZipFile
             try:
                 _zip_file_cache[cache_key].close()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to close cached ZipFile: {e}")
             del _zip_file_cache[cache_key]
 
     # 缓存未命中或文件已更新，重新打开 ZIP 并构建索引
@@ -764,7 +764,7 @@ async def download_file(dict_id: str, filename: str):
 
 
 class EntryIdsRequest(BaseModel):
-    entries: list[int]
+    entries: list[int] = Field(..., min_items=1, max_items=10000)
 
 
 @app.post("/download/{dict_id}/entries")
@@ -782,6 +782,13 @@ async def download_entries_batch(dict_id: str, data: EntryIdsRequest):
         raise HTTPException(status_code=400, detail="No entries provided")
 
     entry_ids = list(data.entries)
+    
+    # Validate individual entry IDs
+    for entry_id in entry_ids:
+        if entry_id <= 0:
+            raise HTTPException(status_code=400, detail="All entry IDs must be positive")
+        if entry_id > 2**31 - 1:
+            raise HTTPException(status_code=400, detail="Entry ID too large")
 
     dctx = await get_zstd_decompressor(dict_id)
 
@@ -859,6 +866,12 @@ async def query_word(dict_id: str, word: str, request: Request):
 @app.get("/entry/{dict_id}/{entry_id}")
 async def query_entry(dict_id: str, entry_id: int):
     """查询单个词条接口"""
+    # Validate entry_id bounds
+    if entry_id <= 0:
+        raise HTTPException(status_code=400, detail="Entry ID must be positive")
+    if entry_id > 2**31 - 1:
+        raise HTTPException(status_code=400, detail="Entry ID too large")
+    
     conn = await get_db_connection(dict_id)
     if conn is None:
         raise HTTPException(status_code=404, detail=f"Dictionary '{dict_id}' not found")
@@ -1102,7 +1115,14 @@ async def get_audio_file(dict_id: str, file_path: str):
     # 兼容旧的目录结构
     logger.info(f"[AUDIO] 从目录读取: {file_path}")
     audios_path = dict_path / "audios"
-    audio_file = audios_path / file_path
+    audio_file = (audios_path / file_path).resolve()
+    
+    # Security: Prevent path traversal attacks
+    try:
+        audio_file.relative_to(audios_path.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied - path traversal not allowed")
+    
     if audio_file.exists() and audio_file.is_file():
         response = FileResponse(
             path=str(audio_file),
@@ -1176,7 +1196,14 @@ async def get_image_file(dict_id: str, file_path: str):
 
     # 兼容旧的目录结构
     images_path = dict_path / "images"
-    image_file = images_path / file_path
+    image_file = (images_path / file_path).resolve()
+    
+    # Security: Prevent path traversal attacks
+    try:
+        image_file.relative_to(images_path.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied - path traversal not allowed")
+    
     if image_file.exists() and image_file.is_file():
         return FileResponse(
             path=str(image_file),
