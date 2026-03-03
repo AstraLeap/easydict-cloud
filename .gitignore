@@ -1,8 +1,12 @@
 # 环境变量（包含本地路径和密钥，不能上传）
 .env
 
-# 词典数据（用户自备，不随代码分发）
+# 数据目录（用户自备的词典和用户数据，不随代码分发）
+easydict-data/
+
+# 旧数据目录（已弃用，保留向后兼容）
 dicts/
+data/
 
 # Large database files
 auxi/en.db
@@ -19,9 +23,6 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-
-# Docker 数据目录（运行时生成）
-data/
 
 # IDE / 编辑器配置
 .claude/

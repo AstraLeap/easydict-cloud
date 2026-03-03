@@ -36,10 +36,12 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("easydict")
 
-DATA_DIR = Path(os.environ.get("USER_DATA_PATH", "/data/user"))
+# 根数据目录（自动构建子目录路径）
+DATA_PATH = Path(os.environ.get("DATA_PATH", "./easydict-data"))
+DATA_DIR = DATA_PATH / "user"
 DB_PATH = DATA_DIR / "user.db"
 SETTINGS_DIR = DATA_DIR / "settings"
-DICTS_PATH = Path(os.environ.get("DICTIONARIES_PATH", "/data/dictionaries"))
+DICTS_PATH = DATA_PATH / "dictionaries"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_DIR.mkdir(parents=True, exist_ok=True)

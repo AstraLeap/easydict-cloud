@@ -49,10 +49,12 @@ def performance_timer(operation_name: str, log_level: int = logging.INFO):
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         logger.log(log_level, f"[PERF] {operation_name}: {elapsed_ms:.2f}ms")
 
+# 根数据目录（自动构建子目录路径）
+DATA_PATH = Path(os.getenv("DATA_PATH", "./easydict-data"))
 # 词典数据根目录
-DICTIONARIES_PATH = Path(os.getenv("DICTIONARIES_PATH", "/data/dictionaries"))
+DICTIONARIES_PATH = DATA_PATH / "dictionaries"
 # 辅助数据文件目录
-AUXILIARY_PATH = Path(os.getenv("AUXILIARY_PATH", "/data/auxiliary"))
+AUXILIARY_PATH = DATA_PATH / "auxiliary"
 CACHE_PATH = Path(os.getenv("CACHE_PATH", "/tmp/easydict-cache"))
 
 # 数据库连接缓存

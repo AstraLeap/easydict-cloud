@@ -25,8 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 根数据目录
+DATA_PATH = Path(os.getenv("DATA_PATH", "./easydict-data"))
 # 词典数据根目录
-DICTIONARIES_PATH = Path(os.getenv("DICTIONARIES_PATH", "/data/dictionaries"))
+DICTIONARIES_PATH = DATA_PATH / "dictionaries"
 
 
 def create_media_db(dict_path: Path) -> bool:

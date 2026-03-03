@@ -5,11 +5,11 @@ services:
     image: nginx:alpine
     container_name: easydict-nginx
     ports:
-      - "3070:80"
+      - "${NGINX_PORT:-3070}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${DICTIONARIES_PATH:-./data/dictionaries}:/data/dictionaries:ro
-      - ${AUXILIARY_PATH:-./data/auxiliary}:/data/auxiliary:ro
+      - ${DATA_PATH:-./easydict-data}/dictionaries:/data/dictionaries:ro
+      - ${DATA_PATH:-./easydict-data}/auxiliary:/data/auxiliary:ro
       - ./logs/nginx:/var/log/nginx
     deploy:
       resources:
@@ -37,16 +37,12 @@ services:
       dockerfile: Dockerfile
     container_name: easydict-api
     environment:
-      - DICTIONARIES_PATH=/data/dictionaries
-      - AUXILIARY_PATH=/data/auxiliary
-      - USER_DATA=/data/user
+      - DATA_PATH=/data/easydict
       - PORT=8080
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./api/main.py:/app/main.py:ro
-      - ${DICTIONARIES_PATH:-./data/dictionaries}:/data/dictionaries:ro
-      - ${AUXILIARY_PATH:-./data/auxiliary}:/data/auxiliary:ro
-      - ./data/user:/data/user:ro
+      - ${DATA_PATH:-./easydict-data}:/data/easydict
     expose:
       - "8080"
     deploy:
@@ -73,12 +69,11 @@ services:
       dockerfile: Dockerfile
     container_name: easydict-user
     environment:
-      - USER_DATA_PATH=/data/user
-      - DICTIONARIES_PATH=/data/dictionaries
+      - DATA_PATH=/data/easydict
       - JWT_SECRET=${JWT_SECRET:-}
     volumes:
-      - ./data/user:/data/user
-      - ${DICTIONARIES_PATH:-./data/dictionaries}:/data/dictionaries
+      - ./user/main.py:/app/main.py:ro
+      - ${DATA_PATH:-./easydict-data}:/data/easydict
     expose:
       - "8000"
     deploy:
