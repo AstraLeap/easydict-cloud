@@ -4,6 +4,9 @@
 # 词典数据（用户自备，不随代码分发）
 dicts/
 
+# Large database files
+auxi/en.db
+
 # 运行时日志
 logs/
 
