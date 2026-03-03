@@ -3,6 +3,7 @@ docker/.env
 
 # 词典数据（用户自备，不随代码分发）
 dicts/
+auxi/
 
 # 运行时日志
 docker/logs/
