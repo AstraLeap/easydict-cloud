@@ -4,9 +4,12 @@
 # 数据目录（用户自备的词典和用户数据，不随代码分发）
 easydict-data/
 
-# 旧数据目录（已弃用，保留向后兼容）
+# 旧数据目录（已弃用，需要系统管理员手动清理）
+# 这些目录由早期的 Docker 运行创建，权限由 root 管理
+# 可安全删除：rm -rf dicts/ data/ docker/data/
 dicts/
 data/
+docker/data/
 
 # Large database files
 auxi/en.db
