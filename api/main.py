@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import aiosqlite
 import zstandard as zstd
 from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1232,6 +1232,173 @@ async def get_auxiliary_file(filename: str):
             "Cache-Control": "public, max-age=86400"  # 缓存1天
         }
     )
+
+
+# 根页面 - HTML 欢迎页面
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """返回根页面 HTML"""
+    html_content = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EasyDict 词典服务</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #333;
+        }
+        
+        .container {
+            text-align: center;
+            background: white;
+            padding: 60px 40px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            animation: slideIn 0.6s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .cat-container {
+            margin: 20px 0 40px 0;
+        }
+        
+        svg {
+            width: 200px;
+            height: 200px;
+            filter: drop-shadow(0 5px 15px rgba(102, 126, 234, 0.3));
+            animation: bounce 2s ease-in-out infinite;
+        }
+        
+        @keyframes bounce {
+            0%, 100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-15px);
+            }
+        }
+        
+        h1 {
+            font-size: 28px;
+            margin-bottom: 20px;
+            color: #667eea;
+        }
+        
+        .message {
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .hint {
+            background: #f0f4ff;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #555;
+            border-left: 4px solid #667eea;
+        }
+        
+        .emoji {
+            display: inline-block;
+            margin: 0 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>EasyDict 词典服务</h1>
+        
+        <div class="cat-container">
+            <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+                <!-- 头 -->
+                <circle cx="100" cy="100" r="70" fill="#FFB84D" stroke="#333" stroke-width="2"/>
+                
+                <!-- 左耳 -->
+                <path d="M 60 50 L 50 20 L 70 40 Z" fill="#FFB84D" stroke="#333" stroke-width="2"/>
+                <polygon points="55,35 50,25 65,38" fill="#FFB5C5"/>
+                
+                <!-- 右耳 -->
+                <path d="M 140 50 L 150 20 L 130 40 Z" fill="#FFB84D" stroke="#333" stroke-width="2"/>
+                <polygon points="145,35 150,25 135,38" fill="#FFB5C5"/>
+                
+                <!-- 左眼 -->
+                <circle cx="80" cy="85" r="8" fill="#333"/>
+                <circle cx="82" cy="83" r="3" fill="white"/>
+                
+                <!-- 右眼 -->
+                <circle cx="120" cy="85" r="8" fill="#333"/>
+                <circle cx="122" cy="83" r="3" fill="white"/>
+                
+                <!-- 鼻子 -->
+                <polygon points="100,105 95,115 105,115" fill="#FFB5C5" stroke="#333" stroke-width="1"/>
+                
+                <!-- 嘴 -->
+                <path d="M 100 115 Q 85 125 80 120" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>
+                <path d="M 100 115 Q 115 125 120 120" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>
+                
+                <!-- 左胡须 -->
+                <line x1="60" y1="100" x2="30" y2="95" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+                <line x1="60" y1="110" x2="30" y2="115" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+                
+                <!-- 右胡须 -->
+                <line x1="140" y1="100" x2="170" y2="95" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+                <line x1="140" y1="110" x2="170" y2="115" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+                
+                <!-- 身体 -->
+                <ellipse cx="100" cy="160" rx="45" ry="35" fill="#FFB84D" stroke="#333" stroke-width="2"/>
+                
+                <!-- 左前腿 -->
+                <rect x="75" y="190" width="12" height="25" rx="6" fill="#FFB84D" stroke="#333" stroke-width="2"/>
+                
+                <!-- 右前腿 -->
+                <rect x="113" y="190" width="12" height="25" rx="6" fill="#FFB84D" stroke="#333" stroke-width="2"/>
+            </svg>
+        </div>
+        
+        <div class="message">
+            <span class="emoji">😸</span>
+            服务器不是用来在浏览器中访问的哦~
+            <span class="emoji">😸</span>
+        </div>
+        
+        <div class="hint">
+            这是一个 API 服务，请使用合适的客户端或 API 调用来获取词典数据。
+            <br><br>
+            📚 访问 <code>/dictionaries</code> 获取词典列表
+            <br>
+            🔍 访问 <code>/word/{dict_id}/{word}</code> 查询单词
+        </div>
+    </div>
+</body>
+</html>"""
+    return html_content
 
 
 # 全局异常处理
