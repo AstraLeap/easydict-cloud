@@ -905,6 +905,16 @@ async def upsert_dict_entries(
 
         # 同步 sqlite3 操作放入线程池避免阻塞事件循环
         def _do_writes():
+            # 首先获取现有的 entry IDs，用于判断是 insert 还是 update
+            existing_eids = set()
+            if upsert_entries or delete_entry_ids:
+                db_conn = sqlite3.connect(str(db_path))
+                try:
+                    cursor = db_conn.execute("SELECT DISTINCT entry_id FROM entries")
+                    existing_eids = {row[0] for row in cursor.fetchall()}
+                finally:
+                    db_conn.close()
+            
             if delete_entry_ids:
                 db_conn = sqlite3.connect(str(db_path))
                 try:
@@ -921,8 +931,10 @@ async def upsert_dict_entries(
                 zdict_bytes = _get_zstd_dict(db_path)
                 for entry in upsert_entries:
                     upsert_entry_in_db(db_path, entry, zdict_bytes)
+            
+            return existing_eids
 
-        await asyncio.to_thread(_do_writes)
+        existing_eids = await asyncio.to_thread(_do_writes)
         await invalidate_api_dict_cache(dict_id)
 
         for eid in delete_entry_ids:
@@ -930,7 +942,10 @@ async def upsert_dict_entries(
         for entry in upsert_entries:
             eid = entry.get("entry_id")
             if eid is not None:
-                await record_version(dict_id, ver, message, "entry", "dictionary.db", int(eid))
+                eid_int = int(eid)
+                # 区分 insert 和 update：如果在执行前不存在，则是 insert；否则是 update
+                change_type = "insert" if eid_int not in existing_eids else "update"
+                await record_version(dict_id, ver, message, change_type, "dictionary.db", eid_int)
     except HTTPException:
         raise
     except Exception as e:
@@ -992,20 +1007,25 @@ async def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> d
                 entries_needed.clear()
                 entries_deleted.clear()
                 entries_state.clear()
-        elif r["change_type"] == "entry" and not db_file_updated:
+        elif r["change_type"] in ("insert", "update", "entry") and not db_file_updated:
             eid = int(r["entry_id"])
-            # 标记此entry在from_ver到to_ver之间被upsert过
-            entries_state[eid] = "upserted"
+            # 标记此entry的最终状态：insert 或 update 都视为"存在且被修改"
+            entries_state[eid] = r["change_type"]
             entries_needed[eid] = None
-            # 如果之前记录为删除，现在又被 upsert，则从删除列表移除
+            # 如果之前记录为删除，现在又被 insert/update，则从删除列表移除
             entries_deleted.pop(eid, None)
         elif r["change_type"] == "delete" and not db_file_updated:
             eid = int(r["entry_id"])
-            # 只有在该entry被删除且之前没有在from_ver到to_ver间被upsert过，才算真正的删除
-            if entries_state.get(eid) != "upserted":
+            # 只有在该entry被删除且之前是 update（不是 insert）时，才算真正的删除
+            # 如果是 insert 然后 delete，说明这个 entry 在整个版本范围内不存在，不需要删除
+            if entries_state.get(eid) == "update":
                 entries_deleted[eid] = None
-                # 如果之前记录为需要更新，现在又被删除，则从更新列表移除
+                # 从更新列表移除
                 entries_needed.pop(eid, None)
+            elif eid in entries_state and entries_state[eid] == "insert":
+                # 新增的 entry 又被删除了，从需要的列表和状态中移除
+                entries_needed.pop(eid, None)
+                entries_state.pop(eid, None)
 
     return {
         "files": sorted(files_needed),
