@@ -490,6 +490,22 @@ async def list_dicts(user: dict = Depends(get_current_user)):
     return [{"dict_id": d["dict_id"], "name": d["name"], "has_media": bool(d["has_media"]), "created_at": d["created_at"], "updated_at": d["updated_at"]} for d in dicts]
 
 
+@app.delete("/user/dicts/{dict_id}")
+async def delete_dict(dict_id: str, user: dict = Depends(get_current_user)):
+    conn = get_db()
+    d_cursor = await conn.execute(
+        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
+    )
+    d = await d_cursor.fetchone()
+    await d_cursor.close()
+    if not d:
+        raise HTTPException(status_code=404, detail="Dict not found")
+    shutil.rmtree(dict_dir(dict_id), ignore_errors=True)
+    await conn.execute("DELETE FROM dicts WHERE dict_id = ?", (dict_id,))
+    await conn.commit()
+    return {"success": True}
+
+
 # upload.dict.dxde.de 专用路由（绕过 Cloudflare，用于大文件上传）
 
 
