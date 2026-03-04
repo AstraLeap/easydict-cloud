@@ -490,109 +490,6 @@ async def list_dicts(user: dict = Depends(get_current_user)):
     return [{"dict_id": d["dict_id"], "name": d["name"], "has_media": bool(d["has_media"]), "created_at": d["created_at"], "updated_at": d["updated_at"]} for d in dicts]
 
 
-@app.post("/user/dicts")
-async def create_dict(
-    user: dict = Depends(get_current_user),
-    metadata_file: UploadFile = File(...),
-    dictionary_file: UploadFile = File(...),
-    logo_file: UploadFile = File(...),
-    media_file: Optional[UploadFile] = File(None),
-    message: str = Form("初始上传")
-):
-    errors = []
-    for f in [metadata_file, dictionary_file, logo_file]:
-        if not f.filename:
-            errors.append(f"缺少必需文件")
-    if errors:
-        raise HTTPException(status_code=400, detail=errors)
-    
-    # Validate file sizes
-    if metadata_file.size is not None and metadata_file.size > MAX_METADATA_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
-    if dictionary_file.size is not None and dictionary_file.size > MAX_DICTIONARY_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
-    if logo_file.size is not None and logo_file.size > MAX_METADATA_FILE_SIZE:  # Logo should be small
-        raise HTTPException(status_code=413, detail="Logo file too large")
-    if media_file and media_file.filename and media_file.size is not None and media_file.size > MAX_MEDIA_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-
-    try:
-        meta_content = await metadata_file.read()
-        # Additional size check on actual content
-        if len(meta_content) > MAX_METADATA_FILE_SIZE:
-            raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
-        meta = json.loads(meta_content.decode("utf-8"))
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to parse metadata.json: {e}")
-        raise HTTPException(status_code=400, detail="Invalid metadata.json")
-
-    missing = validate_metadata_keys(meta)
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required keys: {missing}")
-
-    version_error = validate_metadata_version(meta)
-    if version_error:
-        raise HTTPException(status_code=400, detail=version_error)
-
-    dict_id = str(meta.get("id", "")).strip()
-    if not validate_dict_id(dict_id):
-        raise HTTPException(status_code=400, detail="Invalid dict_id")
-
-    conn = get_db()
-    existing_cursor = await conn.execute("SELECT id FROM dicts WHERE dict_id = ?", (dict_id,))
-    existing = await existing_cursor.fetchone()
-    await existing_cursor.close()
-    disk_exists = dict_id_exists(dict_id)
-    if existing or disk_exists:
-        raise HTTPException(status_code=400, detail="Dict ID already exists")
-
-    target_dir = dict_dir(dict_id)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    has_media = False
-
-    try:
-        (target_dir / "metadata.json").write_bytes(meta_content)
-        
-        dictionary_data = await dictionary_file.read()
-        if len(dictionary_data) > MAX_DICTIONARY_FILE_SIZE:
-            raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
-        (target_dir / "dictionary.db").write_bytes(dictionary_data)
-        
-        logo_data = await logo_file.read()
-        if len(logo_data) > MAX_METADATA_FILE_SIZE:
-            raise HTTPException(status_code=413, detail="Logo file too large")
-        (target_dir / "logo.png").write_bytes(logo_data)
-        
-        if media_file and media_file.filename:
-            media_data = await media_file.read()
-            if len(media_data) > MAX_MEDIA_FILE_SIZE:
-                raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-            (target_dir / "media.db").write_bytes(media_data)
-            has_media = True
-
-        await invalidate_api_dict_cache(dict_id)
-
-        display_name = (meta.get("name") or "").strip() or dict_id
-        now = datetime.now(timezone.utc).isoformat()
-        await conn.execute(
-            "INSERT INTO dicts (dict_id, user_id, name, has_media, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (dict_id, user["id"], display_name, int(has_media), now, now)
-        )
-        await conn.commit()
-        ver = await next_version(dict_id)
-        for fname in ["metadata.json", "dictionary.db", "logo.png"]:
-            await record_version(dict_id, ver, message, "file", fname)
-        if has_media:
-            await record_version(dict_id, ver, message, "file", "media.db")
-
-        return {"success": True, "dict_id": dict_id, "name": display_name}
-    except Exception as e:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # upload.dict.dxde.de 专用路由（绕过 Cloudflare，用于大文件上传）
 
 
@@ -654,6 +551,109 @@ async def get_updates_batch(request: Request):
 # upload.dict.dxde.de 专用路由（绕过 Cloudflare，用于大文件上传）
 
 
+async def create_dict_impl(
+    user: dict,
+    metadata_file: UploadFile,
+    dictionary_file: UploadFile,
+    logo_file: UploadFile,
+    media_file: Optional[UploadFile] = None,
+    message: str = "初始上传"
+):
+    """Internal implementation of dictionary creation logic"""
+    errors = []
+    for f in [metadata_file, dictionary_file, logo_file]:
+        if not f.filename:
+            errors.append(f"缺少必需文件")
+    if errors:
+        raise HTTPException(status_code=400, detail=errors)
+    
+    # Validate file sizes
+    if metadata_file.size is not None and metadata_file.size > MAX_METADATA_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
+    if dictionary_file.size is not None and dictionary_file.size > MAX_DICTIONARY_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
+    if logo_file.size is not None and logo_file.size > MAX_METADATA_FILE_SIZE:  # Logo should be small
+        raise HTTPException(status_code=413, detail="Logo file too large")
+    if media_file and media_file.filename and media_file.size is not None and media_file.size > MAX_MEDIA_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
+
+    try:
+        meta_content = await metadata_file.read()
+        # Additional size check on actual content
+        if len(meta_content) > MAX_METADATA_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
+        meta = json.loads(meta_content.decode("utf-8"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to parse metadata.json: {e}")
+        raise HTTPException(status_code=400, detail="Invalid metadata.json")
+
+    missing = validate_metadata_keys(meta)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required keys: {missing}")
+
+    version_error = validate_metadata_version(meta)
+    if version_error:
+        raise HTTPException(status_code=400, detail=version_error)
+
+    dict_id = str(meta.get("id", "")).strip()
+    if not validate_dict_id(dict_id):
+        raise HTTPException(status_code=400, detail="Invalid dict_id format. dict_id must match pattern: ^[a-zA-Z0-9_\\-]{1,64}$")
+
+    conn = get_db()
+    existing_cursor = await conn.execute("SELECT id FROM dicts WHERE dict_id = ?", (dict_id,))
+    existing = await existing_cursor.fetchone()
+    await existing_cursor.close()
+    disk_exists = dict_id_exists(dict_id)
+    if existing or disk_exists:
+        raise HTTPException(status_code=400, detail="Dict ID already exists")
+
+    target_dir = dict_dir(dict_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    has_media = False
+
+    try:
+        (target_dir / "metadata.json").write_bytes(meta_content)
+        
+        dictionary_data = await dictionary_file.read()
+        if len(dictionary_data) > MAX_DICTIONARY_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
+        (target_dir / "dictionary.db").write_bytes(dictionary_data)
+        
+        logo_data = await logo_file.read()
+        if len(logo_data) > MAX_METADATA_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="Logo file too large")
+        (target_dir / "logo.png").write_bytes(logo_data)
+        
+        if media_file and media_file.filename:
+            media_data = await media_file.read()
+            if len(media_data) > MAX_MEDIA_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
+            (target_dir / "media.db").write_bytes(media_data)
+            has_media = True
+
+        await invalidate_api_dict_cache(dict_id)
+
+        display_name = (meta.get("name") or "").strip() or dict_id
+        now = datetime.now(timezone.utc).isoformat()
+        await conn.execute(
+            "INSERT INTO dicts (dict_id, user_id, name, has_media, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (dict_id, user["id"], display_name, int(has_media), now, now)
+        )
+        await conn.commit()
+        ver = await next_version(dict_id)
+        for fname in ["metadata.json", "dictionary.db", "logo.png"]:
+            await record_version(dict_id, ver, message, "file", fname)
+        if has_media:
+            await record_version(dict_id, ver, message, "file", "media.db")
+
+        return {"success": True, "dict_id": dict_id, "name": display_name}
+    except Exception as e:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/")
 async def upload_create_dict(request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
@@ -679,7 +679,7 @@ async def upload_create_dict(request: Request, user: dict = Depends(get_current_
         logger.warning(f"[upload_create_dict] missing fields: {missing}, all fields: {field_names}")
         raise HTTPException(status_code=422, detail=f"Missing required fields: {missing}. Received: {field_names}")
 
-    return await create_dict(
+    return await create_dict_impl(
         user=user,
         metadata_file=metadata_file,
         dictionary_file=dictionary_file,
@@ -689,61 +689,22 @@ async def upload_create_dict(request: Request, user: dict = Depends(get_current_
     )
 
 
-@app.post("/{dict_id}")
-async def upload_update_dict(dict_id: str, request: Request, user: dict = Depends(get_current_user)):
-    form = await request.form()
-    field_names = list(form.keys())
-    logger.info(f"[upload_update_dict] dict_id={dict_id} received fields: {field_names}")
-
-    def _get_file(name):
-        val = form.get(name)
-        return val if (val and hasattr(val, 'filename')) else None
-
-    def _get_str(name, default=None):
-        val = form.get(name)
-        return str(val) if val and not hasattr(val, 'filename') else default
-
-    message = _get_str("message", "更新词典")
-
-    return await update_dict(
-        dict_id=dict_id,
-        user=user,
-        message=message,
-        metadata_file=_get_file("metadata_file"),
-        dictionary_file=_get_file("dictionary_file"),
-        logo_file=_get_file("logo_file"),
-        media_file=_get_file("media_file"),
-    )
-
-
-@app.delete("/user/dicts/{dict_id}")
-async def delete_dict(dict_id: str, user: dict = Depends(get_current_user)):
-    conn = get_db()
-    d_cursor = await conn.execute(
-        "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
-    )
-    d = await d_cursor.fetchone()
-    await d_cursor.close()
-    if not d:
-        raise HTTPException(status_code=404, detail="Dict not found")
-    shutil.rmtree(dict_dir(dict_id), ignore_errors=True)
-    await conn.execute("DELETE FROM dicts WHERE dict_id = ?", (dict_id,))
-    await conn.commit()
-    return {"success": True}
-
-
-@app.post("/user/dicts/{dict_id}")
-async def update_dict(
+async def update_dict_impl(
     dict_id: str,
-    user: dict = Depends(get_current_user),
-    message: str = Form(...),
-    metadata_file: Optional[UploadFile] = File(None),
-    dictionary_file: Optional[UploadFile] = File(None),
-    logo_file: Optional[UploadFile] = File(None),
-    media_file: Optional[UploadFile] = File(None),
+    user: dict,
+    message: str = "更新词典",
+    metadata_file: Optional[UploadFile] = None,
+    dictionary_file: Optional[UploadFile] = None,
+    logo_file: Optional[UploadFile] = None,
+    media_file: Optional[UploadFile] = None,
 ):
+    """Internal implementation of dictionary update logic"""
+    # Validate dict_id format
+    if not validate_dict_id(dict_id):
+        raise HTTPException(status_code=400, detail="Invalid dict_id format. dict_id must match pattern: ^[a-zA-Z0-9_\\-]{1,64}$")
+    
     t0 = time.time()
-    logger.info(f"[update_dict] START dict_id={dict_id} user={user.get('id')}")
+    logger.info(f"[update_dict_impl] START dict_id={dict_id} user={user.get('id')}")
     conn = get_db()
     d_cursor = await conn.execute(
         "SELECT * FROM dicts WHERE dict_id = ? AND user_id = ?", (dict_id, user["id"])
@@ -763,12 +724,12 @@ async def update_dict(
 
     try:
         if metadata_file and metadata_file.filename:
-            logger.info(f"[update_dict] reading metadata_file elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] reading metadata_file elapsed={time.time()-t0:.1f}s")
             meta_content = await metadata_file.read()
             # Validate file size
             if len(meta_content) > MAX_METADATA_FILE_SIZE:
                 raise HTTPException(status_code=413, detail=f"Metadata file too large (max {MAX_METADATA_FILE_SIZE / 1024 / 1024:.0f}MB)")
-            logger.info(f"[update_dict] metadata_file read done size={len(meta_content)} elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] metadata_file read done size={len(meta_content)} elapsed={time.time()-t0:.1f}s")
             meta = json.loads(meta_content.decode("utf-8"))
             missing = validate_metadata_keys(meta)
             if missing:
@@ -784,35 +745,35 @@ async def update_dict(
             updated_files.append("metadata.json")
 
         if dictionary_file and dictionary_file.filename:
-            logger.info(f"[update_dict] reading dictionary_file elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] reading dictionary_file elapsed={time.time()-t0:.1f}s")
             data = await dictionary_file.read()
             # Validate file size
             if len(data) > MAX_DICTIONARY_FILE_SIZE:
                 raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
-            logger.info(f"[update_dict] dictionary_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] dictionary_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
             (target_dir / "dictionary.db").write_bytes(data)
-            logger.info(f"[update_dict] dictionary_file write done elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] dictionary_file write done elapsed={time.time()-t0:.1f}s")
             updated_files.append("dictionary.db")
 
         if logo_file and logo_file.filename:
-            logger.info(f"[update_dict] reading logo_file elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] reading logo_file elapsed={time.time()-t0:.1f}s")
             data = await logo_file.read()
             # Validate file size
             if len(data) > MAX_METADATA_FILE_SIZE:
                 raise HTTPException(status_code=413, detail="Logo file too large")
-            logger.info(f"[update_dict] logo_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] logo_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
             (target_dir / "logo.png").write_bytes(data)
             updated_files.append("logo.png")
 
         if media_file and media_file.filename:
-            logger.info(f"[update_dict] reading media_file elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] reading media_file elapsed={time.time()-t0:.1f}s")
             data = await media_file.read()
             # Validate file size
             if len(data) > MAX_MEDIA_FILE_SIZE:
                 raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-            logger.info(f"[update_dict] media_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] media_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
             (target_dir / "media.db").write_bytes(data)
-            logger.info(f"[update_dict] media_file write done elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] media_file write done elapsed={time.time()-t0:.1f}s")
             has_media = True
             updated_files.append("media.db")
 
@@ -835,12 +796,42 @@ async def update_dict(
         for fname in updated_files:
             await record_version(dict_id, ver, message, "file", fname)
 
-        logger.info(f"[update_dict] DONE dict_id={dict_id} updated_files={updated_files} total={time.time()-t0:.1f}s")
+        logger.info(f"[update_dict_impl] DONE dict_id={dict_id} updated_files={updated_files} total={time.time()-t0:.1f}s")
         return {"success": True, "dict_id": dict_id, "version": ver, "updated_files": updated_files}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/{dict_id}")
+async def upload_update_dict(dict_id: str, request: Request, user: dict = Depends(get_current_user)):
+    form = await request.form()
+    field_names = list(form.keys())
+    logger.info(f"[upload_update_dict] dict_id={dict_id} received fields: {field_names}")
+
+    def _get_file(name):
+        val = form.get(name)
+        return val if (val and hasattr(val, 'filename')) else None
+
+    def _get_str(name, default=None):
+        val = form.get(name)
+        return str(val) if val and not hasattr(val, 'filename') else default
+
+    message = _get_str("message", "更新词典")
+
+    return await update_dict_impl(
+        dict_id=dict_id,
+        user=user,
+        message=message,
+        metadata_file=_get_file("metadata_file"),
+        dictionary_file=_get_file("dictionary_file"),
+        logo_file=_get_file("logo_file"),
+        media_file=_get_file("media_file"),
+    )
+
+
+
 
 
 @app.post("/user/dicts/{dict_id}/entries")
