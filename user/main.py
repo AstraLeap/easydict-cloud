@@ -981,6 +981,7 @@ async def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> d
     files_needed: set[str] = set()
     entries_needed: dict[int, None] = {}
     entries_deleted: dict[int, None] = {}
+    entries_state: dict[int, str] = {}  # 追踪每个entry从from_ver到to_ver的状态变化
     db_file_updated = False
 
     for r in rows:
@@ -990,16 +991,21 @@ async def _compute_required_files(dict_id: str, from_ver: int, to_ver: int) -> d
                 db_file_updated = True
                 entries_needed.clear()
                 entries_deleted.clear()
+                entries_state.clear()
         elif r["change_type"] == "entry" and not db_file_updated:
             eid = int(r["entry_id"])
+            # 标记此entry在from_ver到to_ver之间被upsert过
+            entries_state[eid] = "upserted"
             entries_needed[eid] = None
             # 如果之前记录为删除，现在又被 upsert，则从删除列表移除
             entries_deleted.pop(eid, None)
         elif r["change_type"] == "delete" and not db_file_updated:
             eid = int(r["entry_id"])
-            entries_deleted[eid] = None
-            # 如果之前记录为需要更新，现在又被删除，则从更新列表移除
-            entries_needed.pop(eid, None)
+            # 只有在该entry被删除且之前没有在from_ver到to_ver间被upsert过，才算真正的删除
+            if entries_state.get(eid) != "upserted":
+                entries_deleted[eid] = None
+                # 如果之前记录为需要更新，现在又被删除，则从更新列表移除
+                entries_needed.pop(eid, None)
 
     return {
         "files": sorted(files_needed),
