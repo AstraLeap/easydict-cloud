@@ -643,10 +643,13 @@ async def create_dict_impl(
         (target_dir / "logo.png").write_bytes(logo_data)
         
         if media_file and media_file.filename:
-            media_data = await media_file.read()
-            if len(media_data) > MAX_MEDIA_FILE_SIZE:
-                raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-            (target_dir / "media.db").write_bytes(media_data)
+            total_size = 0
+            with open(target_dir / "media.db", "wb") as f:
+                while chunk := await media_file.read(1024 * 1024):
+                    total_size += len(chunk)
+                    if total_size > MAX_MEDIA_FILE_SIZE:
+                        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
+                    f.write(chunk)
             has_media = True
 
         await invalidate_api_dict_cache(dict_id)
@@ -664,7 +667,7 @@ async def create_dict_impl(
         if has_media:
             await record_version(dict_id, ver, message, "file", "media.db")
 
-        return {"success": True, "dict_id": dict_id, "name": display_name}
+        return {"success": True, "version": ver}
     except Exception as e:
         shutil.rmtree(target_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -783,13 +786,14 @@ async def update_dict_impl(
 
         if media_file and media_file.filename:
             logger.info(f"[update_dict_impl] reading media_file elapsed={time.time()-t0:.1f}s")
-            data = await media_file.read()
-            # Validate file size
-            if len(data) > MAX_MEDIA_FILE_SIZE:
-                raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-            logger.info(f"[update_dict_impl] media_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
-            (target_dir / "media.db").write_bytes(data)
-            logger.info(f"[update_dict_impl] media_file write done elapsed={time.time()-t0:.1f}s")
+            total_size = 0
+            with open(target_dir / "media.db", "wb") as f:
+                while chunk := await media_file.read(1024 * 1024):
+                    total_size += len(chunk)
+                    if total_size > MAX_MEDIA_FILE_SIZE:
+                        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
+                    f.write(chunk)
+            logger.info(f"[update_dict_impl] media_file write done size={total_size} elapsed={time.time()-t0:.1f}s")
             has_media = True
             updated_files.append("media.db")
 
@@ -813,7 +817,7 @@ async def update_dict_impl(
             await record_version(dict_id, ver, message, "file", fname)
 
         logger.info(f"[update_dict_impl] DONE dict_id={dict_id} updated_files={updated_files} total={time.time()-t0:.1f}s")
-        return {"success": True, "dict_id": dict_id, "version": ver, "updated_files": updated_files}
+        return {"success": True, "version": ver}
     except HTTPException:
         raise
     except Exception as e:
