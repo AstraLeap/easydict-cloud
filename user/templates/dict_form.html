@@ -62,7 +62,7 @@
                         {% if action != 'edit' %}<span class="required-badge">必需</span>{% else %}<span class="optional-badge">可选</span>{% endif %}
                     </label>
                     <div class="upload-area" data-expected="metadata.json">
-                        <input type="file" name="metadata.json" accept=".json">
+                        <input type="file" name="metadata_file" accept=".json">
                         <span class="upload-icon">📄</span>
                         <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
                         <div class="file-name"></div>
@@ -77,7 +77,7 @@
                         {% if action != 'edit' %}<span class="required-badge">必需</span>{% else %}<span class="optional-badge">可选</span>{% endif %}
                     </label>
                     <div class="upload-area" data-expected="dictionary.db">
-                        <input type="file" name="dictionary.db" accept=".db">
+                        <input type="file" name="dictionary_file" accept=".db">
                         <span class="upload-icon">🗃️</span>
                         <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
                         <div class="file-name"></div>
@@ -92,7 +92,7 @@
                         {% if action != 'edit' %}<span class="required-badge">必需</span>{% else %}<span class="optional-badge">可选</span>{% endif %}
                     </label>
                     <div class="upload-area" data-expected="logo.png">
-                        <input type="file" name="logo.png" accept="image/png">
+                        <input type="file" name="logo_file" accept="image/png">
                         <span class="upload-icon">🖼️</span>
                         <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
                         <div class="file-name"></div>
@@ -107,7 +107,7 @@
                         <span class="optional-badge">可选</span>
                     </label>
                     <div class="upload-area" data-expected="media.db">
-                        <input type="file" name="media.db" accept=".db">
+                        <input type="file" name="media_file" accept=".db">
                         <span class="upload-icon">🎵</span>
                         <div class="upload-label"><strong>点击</strong>或拖拽上传</div>
                         <div class="file-name"></div>
