@@ -13,6 +13,7 @@ import sqlite3
 import hashlib
 import secrets
 import zipfile
+import zlib
 import io
 import asyncio
 import unicodedata
@@ -79,6 +80,68 @@ async def invalidate_api_dict_cache(dict_id: str) -> None:
         logger.info(f"[cache] api cache invalidated for '{dict_id}'")
     except Exception as e:
         logger.warning(f"[cache] failed to invalidate api cache for '{dict_id}': {e}")
+
+
+async def update_api_checksums(dict_id: str) -> None:
+    """通知 api 服务更新指定词典的 CRC32 校验值"""
+    import urllib.request
+    url = f"{API_INTERNAL_URL}/internal/checksums/{dict_id}"
+    try:
+        req = urllib.request.Request(url, method="POST")
+        await asyncio.to_thread(urllib.request.urlopen, req, None, 10)
+        logger.info(f"[checksums] api checksums updated for '{dict_id}'")
+    except Exception as e:
+        logger.warning(f"[checksums] failed to update api checksums for '{dict_id}': {e}")
+
+
+def calculate_crc32(data: bytes) -> str:
+    """计算数据的 CRC32 校验值，返回 8 位十六进制字符串"""
+    return format(zlib.crc32(data) & 0xFFFFFFFF, '08x')
+
+
+async def stream_write_file(
+    upload_file: UploadFile,
+    target_path: Path,
+    max_size: int,
+    expected_crc32: Optional[str] = None,
+    filename: str = "",
+) -> int:
+    """
+    流式写入上传文件到目标路径
+    
+    Args:
+        upload_file: 上传的文件对象
+        target_path: 目标文件路径
+        max_size: 最大允许文件大小
+        expected_crc32: 期望的 CRC32 校验值（可选）
+        filename: 文件名（用于错误信息）
+    
+    Returns:
+        写入的总字节数
+    
+    Raises:
+        HTTPException: 文件过大或 CRC32 校验失败
+    """
+    total_size = 0
+    crc32_value = 0
+    
+    with open(target_path, "wb") as f:
+        while chunk := await upload_file.read(1024 * 1024):
+            total_size += len(chunk)
+            if total_size > max_size:
+                raise HTTPException(status_code=413, detail=f"{filename} too large (max {max_size / 1024 / 1024:.0f}MB)")
+            f.write(chunk)
+            if expected_crc32:
+                crc32_value = zlib.crc32(chunk, crc32_value)
+    
+    if expected_crc32:
+        server_crc32 = format(crc32_value & 0xFFFFFFFF, '08x')
+        if server_crc32 != expected_crc32.lower():
+            raise HTTPException(status_code=400, detail=f"{filename} CRC32 mismatch: expected {expected_crc32.lower()}, got {server_crc32}")
+    
+    return total_size
+
+
 OPTIONAL_FILES = {"media.db"}
 ALLOWED_FILES = REQUIRED_FILES | OPTIONAL_FILES
 METADATA_REQUIRED_KEYS = {"id", "name", "source_language", "target_language"}
@@ -573,7 +636,9 @@ async def create_dict_impl(
     dictionary_file: UploadFile,
     logo_file: UploadFile,
     media_file: Optional[UploadFile] = None,
-    message: str = "初始上传"
+    message: str = "初始上传",
+    dictionary_crc32: Optional[str] = None,
+    media_crc32: Optional[str] = None,
 ):
     """Internal implementation of dictionary creation logic"""
     errors = []
@@ -632,27 +697,34 @@ async def create_dict_impl(
     try:
         (target_dir / "metadata.json").write_bytes(meta_content)
         
-        dictionary_data = await dictionary_file.read()
-        if len(dictionary_data) > MAX_DICTIONARY_FILE_SIZE:
-            raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
-        (target_dir / "dictionary.db").write_bytes(dictionary_data)
+        await stream_write_file(
+            dictionary_file,
+            target_dir / "dictionary.db",
+            MAX_DICTIONARY_FILE_SIZE,
+            dictionary_crc32,
+            "dictionary.db"
+        )
         
-        logo_data = await logo_file.read()
-        if len(logo_data) > MAX_METADATA_FILE_SIZE:
-            raise HTTPException(status_code=413, detail="Logo file too large")
-        (target_dir / "logo.png").write_bytes(logo_data)
+        await stream_write_file(
+            logo_file,
+            target_dir / "logo.png",
+            MAX_METADATA_FILE_SIZE,
+            None,
+            "logo.png"
+        )
         
         if media_file and media_file.filename:
-            total_size = 0
-            with open(target_dir / "media.db", "wb") as f:
-                while chunk := await media_file.read(1024 * 1024):
-                    total_size += len(chunk)
-                    if total_size > MAX_MEDIA_FILE_SIZE:
-                        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-                    f.write(chunk)
+            await stream_write_file(
+                media_file,
+                target_dir / "media.db",
+                MAX_MEDIA_FILE_SIZE,
+                media_crc32,
+                "media.db"
+            )
             has_media = True
 
         await invalidate_api_dict_cache(dict_id)
+        await update_api_checksums(dict_id)
 
         display_name = (meta.get("name") or "").strip() or dict_id
         now = datetime.now(timezone.utc).isoformat()
@@ -692,6 +764,8 @@ async def upload_create_dict(request: Request, user: dict = Depends(get_current_
     logo_file = _get_file("logo_file")
     media_file = _get_file("media_file")
     message = _get_str("message", "初始上传")
+    dictionary_crc32 = _get_str("dictionary_crc32")
+    media_crc32 = _get_str("media_crc32")
 
     missing = [n for n, f in [("metadata_file", metadata_file), ("dictionary_file", dictionary_file), ("logo_file", logo_file)] if f is None]
     if missing:
@@ -705,6 +779,8 @@ async def upload_create_dict(request: Request, user: dict = Depends(get_current_
         logo_file=logo_file,
         media_file=media_file,
         message=message,
+        dictionary_crc32=dictionary_crc32,
+        media_crc32=media_crc32,
     )
 
 
@@ -716,6 +792,8 @@ async def update_dict_impl(
     dictionary_file: Optional[UploadFile] = None,
     logo_file: Optional[UploadFile] = None,
     media_file: Optional[UploadFile] = None,
+    dictionary_crc32: Optional[str] = None,
+    media_crc32: Optional[str] = None,
 ):
     """Internal implementation of dictionary update logic"""
     # Validate dict_id format
@@ -764,36 +842,39 @@ async def update_dict_impl(
             updated_files.append("metadata.json")
 
         if dictionary_file and dictionary_file.filename:
-            logger.info(f"[update_dict_impl] reading dictionary_file elapsed={time.time()-t0:.1f}s")
-            data = await dictionary_file.read()
-            # Validate file size
-            if len(data) > MAX_DICTIONARY_FILE_SIZE:
-                raise HTTPException(status_code=413, detail=f"Dictionary file too large (max {MAX_DICTIONARY_FILE_SIZE / 1024 / 1024:.0f}MB)")
-            logger.info(f"[update_dict_impl] dictionary_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
-            (target_dir / "dictionary.db").write_bytes(data)
+            logger.info(f"[update_dict_impl] streaming dictionary_file elapsed={time.time()-t0:.1f}s")
+            await stream_write_file(
+                dictionary_file,
+                target_dir / "dictionary.db",
+                MAX_DICTIONARY_FILE_SIZE,
+                dictionary_crc32,
+                "dictionary.db"
+            )
             logger.info(f"[update_dict_impl] dictionary_file write done elapsed={time.time()-t0:.1f}s")
             updated_files.append("dictionary.db")
 
         if logo_file and logo_file.filename:
-            logger.info(f"[update_dict_impl] reading logo_file elapsed={time.time()-t0:.1f}s")
-            data = await logo_file.read()
-            # Validate file size
-            if len(data) > MAX_METADATA_FILE_SIZE:
-                raise HTTPException(status_code=413, detail="Logo file too large")
-            logger.info(f"[update_dict_impl] logo_file read done size={len(data)} elapsed={time.time()-t0:.1f}s")
-            (target_dir / "logo.png").write_bytes(data)
+            logger.info(f"[update_dict_impl] streaming logo_file elapsed={time.time()-t0:.1f}s")
+            await stream_write_file(
+                logo_file,
+                target_dir / "logo.png",
+                MAX_METADATA_FILE_SIZE,
+                None,
+                "logo.png"
+            )
+            logger.info(f"[update_dict_impl] logo_file write done elapsed={time.time()-t0:.1f}s")
             updated_files.append("logo.png")
 
         if media_file and media_file.filename:
-            logger.info(f"[update_dict_impl] reading media_file elapsed={time.time()-t0:.1f}s")
-            total_size = 0
-            with open(target_dir / "media.db", "wb") as f:
-                while chunk := await media_file.read(1024 * 1024):
-                    total_size += len(chunk)
-                    if total_size > MAX_MEDIA_FILE_SIZE:
-                        raise HTTPException(status_code=413, detail=f"Media file too large (max {MAX_MEDIA_FILE_SIZE / 1024 / 1024 / 1024:.0f}GB)")
-                    f.write(chunk)
-            logger.info(f"[update_dict_impl] media_file write done size={total_size} elapsed={time.time()-t0:.1f}s")
+            logger.info(f"[update_dict_impl] streaming media_file elapsed={time.time()-t0:.1f}s")
+            await stream_write_file(
+                media_file,
+                target_dir / "media.db",
+                MAX_MEDIA_FILE_SIZE,
+                media_crc32,
+                "media.db"
+            )
+            logger.info(f"[update_dict_impl] media_file write done elapsed={time.time()-t0:.1f}s")
             has_media = True
             updated_files.append("media.db")
 
@@ -803,6 +884,7 @@ async def update_dict_impl(
         # dictionary.db 或 media.db 有更新时，统一刷新 api 服务的连接缓存
         if "dictionary.db" in updated_files or "media.db" in updated_files:
             await invalidate_api_dict_cache(dict_id)
+            await update_api_checksums(dict_id)
 
         now = datetime.now(timezone.utc).isoformat()
         display_name = display_name if "display_name" in dir() else d["name"]
@@ -848,6 +930,8 @@ async def upload_update_dict(dict_id: str, request: Request, user: dict = Depend
         dictionary_file=_get_file("dictionary_file"),
         logo_file=_get_file("logo_file"),
         media_file=_get_file("media_file"),
+        dictionary_crc32=_get_str("dictionary_crc32"),
+        media_crc32=_get_str("media_crc32"),
     )
 
 
@@ -947,6 +1031,7 @@ async def upsert_dict_entries(
 
         existing_eids = await asyncio.to_thread(_do_writes)
         await invalidate_api_dict_cache(dict_id)
+        await update_api_checksums(dict_id)
 
         for eid in delete_entry_ids:
             await record_version(dict_id, ver, message, "delete", "dictionary.db", eid)

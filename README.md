@@ -107,6 +107,21 @@ DATA_PATH=/path/to/data docker-compose up -d
 }
 ```
 
+服务端在上传或更新词典后，会自动计算 `dictionary.db` 和 `media.db` 的 CRC32 校验值，并存入 `checksums` 字段：
+
+```json
+{
+  "id": "oxford",
+  "name": "牛津高阶英汉双解词典",
+  "source_language": "en",
+  "target_language": "zh",
+  "checksums": {
+    "dictionary.db": "a1b2c3d4",
+    "media.db": "e5f6g7h8"
+  }
+}
+```
+
 ### 4. 启动服务
 
 ```bash
@@ -181,6 +196,23 @@ curl http://localhost:3070/word/oxford/hello
 | GET | `/download/{词典ID}/file/media.db` | 下载媒体数据库（音频/图片） |
 | POST | `/download/{词典ID}/entries` | 批量下载条目，请求体为 `{"entries": [id1, id2, ...]}` ，返回 `.zst` 压缩的 JSONL 文件 |
 
+**断点续传支持：**
+
+所有文件下载接口支持断点续传：
+- 响应头包含 `Accept-Ranges: bytes`
+- 客户端可发送 `Range: bytes=start-end` 请求部分内容
+- 服务端返回 206 状态码 + `Content-Range` 头
+- 支持格式：`bytes=0-499`（前500字节）、`bytes=500-`（500字节到末尾）、`bytes=-500`（最后500字节）
+
+**CRC32 校验支持：**
+
+下载 `dictionary.db` 或 `media.db` 时，响应头包含 `X-CRC32` 字段：
+```
+X-CRC32: a1b2c3d4
+```
+
+客户端可据此验证下载文件的完整性。`logo.png` 和 `metadata.json` 不返回校验值。
+
 ### 用户认证
 
 需要认证的接口须在请求头携带 Token：`Authorization: Bearer <token>`
@@ -229,6 +261,18 @@ curl http://localhost:3070/word/oxford/hello
 | `logo_file` | 是 | 否 | `logo.png` 词典图标 |
 | `media_file` | 否 | 否 | `media.db` 媒体数据库（音频/图片） |
 | `message` | 否 | 否 | 版本说明（创建默认"初始上传"，更新默认"更新词典"） |
+| `dictionary_crc32` | 否 | 否 | `dictionary.db` 的 CRC32 校验值（8位十六进制，如 `a1b2c3d4`） |
+| `media_crc32` | 否 | 否 | `media.db` 的 CRC32 校验值（8位十六进制） |
+
+**CRC32 上传校验：**
+
+- 若提供 `dictionary_crc32` 或 `media_crc32`，服务端会在接收完成后计算实际 CRC32 并比对
+- 校验失败返回 400 错误：`{"detail": "dictionary.db CRC32 mismatch: expected xxx, got yyy"}`
+- 不提供校验值则跳过验证（向后兼容）
+
+**流式上传：**
+
+所有文件采用流式上传，每次读取 1MB chunk 边读边写，避免大文件占用过多内存。
 
 **增量更新词条（`POST /user/dicts/{词典ID}/entries`）：**
 
@@ -304,6 +348,15 @@ JSONL 每行可以是 **upsert** 或 **删除** 操作，两种操作可混在�
 词典不存在时该项返回 `{"dict_id": "...", "error": "not found"}`，不影响其他词典的查询结果。
 
 `required.files` 表示需要整体重新下载的文件，`required.entries` 表示可增量 upsert 的词条 ID 列表，`required.deleted_entries` 表示需要从本地删除的词条 ID 列表（配合 `/download/{词典ID}/entries` 接口使用）。
+
+### 内部接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/internal/checksums/{词典ID}` | 计算 dictionary.db 和 media.db 的 CRC32，更新到 metadata.json |
+| DELETE | `/internal/cache/{词典ID}` | 清除指定词典的连接缓存和解压器缓存 |
+
+这些接口供内部服务调用，无需认证。
 
 ## 环境变量说明
 

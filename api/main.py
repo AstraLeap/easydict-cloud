@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import zipfile
+import zlib
 import time
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -738,16 +739,43 @@ async def health_check():
 
 
 ALLOWED_FILES = {
-    "logo.png":      ("image/png",                 2592000),  # 缓存30天
-    "metadata.json": ("application/json",           86400),   # 缓存1天
-    "dictionary.db": ("application/vnd.sqlite3",    86400),   # 缓存1天
-    "media.db":      ("application/vnd.sqlite3",    2592000), # 缓存30天
+    "logo.png":      ("image/png",                 2592000),
+    "metadata.json": ("application/json",           86400),
+    "dictionary.db": ("application/vnd.sqlite3",    86400),
+    "media.db":      ("application/vnd.sqlite3",    2592000),
 }
+
+CHECKSUM_FILES = {"dictionary.db", "media.db"}
+
+_metadata_checksums_cache: Dict[str, Dict[str, str]] = {}
+
+
+def get_checksum_from_metadata(dict_id: str, filename: str) -> Optional[str]:
+    """从 metadata.json 获取指定文件的 CRC32 校验值"""
+    if filename not in CHECKSUM_FILES:
+        return None
+
+    if dict_id in _metadata_checksums_cache:
+        return _metadata_checksums_cache[dict_id].get(filename)
+
+    metadata_path = DICTIONARIES_PATH / dict_id / "metadata.json"
+    if not metadata_path.exists():
+        return None
+
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        checksums = metadata.get("checksums", {})
+        _metadata_checksums_cache[dict_id] = checksums
+        return checksums.get(filename)
+    except Exception as e:
+        logger.warning(f"Failed to read checksums from metadata for {dict_id}: {e}")
+        return None
 
 
 @app.get("/download/{dict_id}/file/{filename}")
-async def download_file(dict_id: str, filename: str):
-    """下载词典文件"""
+async def download_file(dict_id: str, filename: str, request: Request):
+    """下载词典文件（支持断点续传）"""
     if filename not in ALLOWED_FILES:
         raise HTTPException(status_code=400, detail=f"File '{filename}' not allowed")
 
@@ -756,12 +784,72 @@ async def download_file(dict_id: str, filename: str):
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found for dictionary '{dict_id}'")
 
     media_type, max_age = ALLOWED_FILES[filename]
-    return FileResponse(
-        path=str(file_path),
+    file_size = file_path.stat().st_size
+
+    crc32_value = get_checksum_from_metadata(dict_id, filename)
+
+    range_header = request.headers.get("range")
+
+    base_headers = {
+        "Cache-Control": f"public, max-age={max_age}",
+        "Accept-Ranges": "bytes",
+    }
+    if crc32_value:
+        base_headers["X-CRC32"] = crc32_value
+
+    if not range_header:
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type,
+            headers=base_headers
+        )
+
+    if not range_header.startswith("bytes="):
+        raise HTTPException(status_code=400, detail="Invalid range header")
+
+    range_spec = range_header[6:]
+    start, end = 0, file_size - 1
+
+    if range_spec.startswith("-"):
+        start = file_size - int(range_spec[1:])
+    elif range_spec.endswith("-"):
+        start = int(range_spec[:-1])
+    else:
+        parts = range_spec.split("-")
+        if len(parts) != 2:
+            raise HTTPException(status_code=400, detail="Invalid range header")
+        start = int(parts[0])
+        end = int(parts[1]) if parts[1] else file_size - 1
+
+    if start >= file_size or end >= file_size or start > end:
+        raise HTTPException(status_code=416, detail="Requested range not satisfiable")
+
+    content_length = end - start + 1
+
+    async def file_iterator():
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            remaining = content_length
+            chunk_size = 64 * 1024
+            while remaining > 0:
+                read_size = min(chunk_size, remaining)
+                data = f.read(read_size)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    range_headers = {
+        **base_headers,
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Length": str(content_length),
+    }
+
+    return StreamingResponse(
+        file_iterator(),
+        status_code=206,
         media_type=media_type,
-        headers={
-            "Cache-Control": f"public, max-age={max_age}"
-        }
+        headers=range_headers
     )
 
 
@@ -925,6 +1013,53 @@ async def invalidate_dict_cache(dict_id: str):
 
     logger.info(f"Cache invalidated for '{dict_id}' (db={closed_db}, media={closed_media})")
     return {"invalidated": dict_id}
+
+
+def calculate_file_crc32(file_path: Path) -> str:
+    """计算文件的 CRC32 校验值，返回 8 位十六进制字符串"""
+    crc32_value = 0
+    with open(file_path, "rb") as f:
+        while chunk := f.read(64 * 1024):
+            crc32_value = zlib.crc32(chunk, crc32_value)
+    return format(crc32_value & 0xFFFFFFFF, '08x')
+
+
+@app.post("/internal/checksums/{dict_id}")
+async def update_checksums(dict_id: str):
+    """计算 dictionary.db 和 media.db 的 CRC32 校验值，更新到 metadata.json"""
+    dict_path = DICTIONARIES_PATH / dict_id
+    if not dict_path.exists() or not dict_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Dictionary '{dict_id}' not found")
+
+    checksums = {}
+
+    for filename in ["dictionary.db", "media.db"]:
+        file_path = dict_path / filename
+        if file_path.exists():
+            checksums[filename] = calculate_file_crc32(file_path)
+            logger.info(f"Calculated CRC32 for {dict_id}/{filename}: {checksums[filename]}")
+
+    if not checksums:
+        raise HTTPException(status_code=400, detail="No database files found")
+
+    metadata_path = dict_path / "metadata.json"
+    metadata = {}
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to read metadata for {dict_id}: {e}")
+
+    metadata["checksums"] = checksums
+
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    _metadata_checksums_cache[dict_id] = checksums
+
+    logger.info(f"Updated checksums for '{dict_id}': {checksums}")
+    return {"dict_id": dict_id, "checksums": checksums}
 
 
 @app.get("/dictionaries")
