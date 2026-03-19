@@ -694,7 +694,7 @@ async def get_dictionary_info(dict_id: str) -> Optional[DictionaryInfo]:
         try:
             conn = await get_db_connection(dict_id)
             if conn:
-                cursor = await conn.execute("SELECT COUNT(DISTINCT headword) as count FROM entries")
+                cursor = await conn.execute("SELECT COUNT(DISTINCT headword) as count FROM indices")
                 row = await cursor.fetchone()
                 entry_count = row[0] if row else 0
                 await cursor.close()
@@ -916,6 +916,12 @@ async def download_entries_batch(dict_id: str, data: EntryIdsRequest):
 
 
 
+def _normalize_query(word: str) -> str:
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", word.lower())
+    return "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn")
+
+
 @app.get("/word/{dict_id}/{word}")
 async def query_word(dict_id: str, word: str, request: Request):
     """查询单词接口"""
@@ -926,14 +932,17 @@ async def query_word(dict_id: str, word: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Dictionary '{dict_id}' not found")
 
     try:
+        word_normalized = _normalize_query(word)
         cursor = await conn.execute(
             """
-            SELECT * FROM entries
-            WHERE headword = ?
-            ORDER BY headword
+            SELECT DISTINCT e.entry_id, e.json_data
+            FROM indices i
+            JOIN entries e ON i.entry_id = e.entry_id
+            WHERE i.headword_normalized = ?
+            ORDER BY i.headword
             LIMIT 50
             """,
-            (word,)
+            (word_normalized,)
         )
 
         rows = await cursor.fetchall()

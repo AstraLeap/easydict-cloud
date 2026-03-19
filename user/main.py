@@ -70,6 +70,21 @@ MAX_ENTRIES_FILE_SIZE = int(os.environ.get("MAX_ENTRIES_FILE_SIZE", 500 * 1024 *
 REQUIRED_FILES = {"metadata.json", "dictionary.db", "logo.png"}
 
 
+def clear_wal_shm_files(db_path: Path) -> None:
+    """清除数据库的 WAL 和 SHM 文件，确保使用新的数据库文件"""
+    wal_path = db_path.with_suffix(db_path.suffix + "-wal")
+    shm_path = db_path.with_suffix(db_path.suffix + "-shm")
+    try:
+        if wal_path.exists():
+            wal_path.unlink()
+            logger.info(f"[wal_shm] removed {wal_path}")
+        if shm_path.exists():
+            shm_path.unlink()
+            logger.info(f"[wal_shm] removed {shm_path}")
+    except Exception as e:
+        logger.warning(f"[wal_shm] failed to clear wal/shm files for {db_path}: {e}")
+
+
 async def invalidate_api_dict_cache(dict_id: str) -> None:
     """通知 api 服务清除指定词典的连接缓存，在替换 dictionary.db 后调用"""
     import urllib.request
@@ -311,6 +326,119 @@ def _normalize_headword(headword: str) -> str:
     return "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn")
 
 
+def normalize_japanese(text: str) -> str:
+    text = text.lower()
+    text = text.replace("tch", "っch")
+    text = re.sub(r"m(?=[bpm])", "ん", text)
+    text = re.sub(r"([bcdfghjklmpqrstvwxyz])\1", r"っ\1", text)
+    text = re.sub(r"n(?=[^aeiouy]|$)", "ん", text)
+    romaji_map = {
+        "kya": "きゃ", "kyu": "きゅ", "kyo": "きょ",
+        "sha": "しゃ", "shi": "し", "shu": "しゅ", "she": "しぇ", "sho": "しょ",
+        "cha": "ちゃ", "chi": "ち", "chu": "ちゅ", "che": "ちぇ", "cho": "ちょ",
+        "nya": "にゃ", "nyu": "にゅ", "nyo": "にょ",
+        "hya": "ひゃ", "hyu": "ひゅ", "hyo": "ひょ",
+        "mya": "みゃ", "myu": "みゅ", "myo": "みょ",
+        "rya": "りゃ", "ryu": "りゅ", "ryo": "りょ",
+        "gya": "ぎゃ", "gyu": "ぎゅ", "gyo": "ぎょ",
+        "ja": "じゃ", "ji": "じ", "ju": "じゅ", "je": "じぇ", "jo": "じょ",
+        "bya": "びゃ", "byu": "びゅ", "byo": "びょ",
+        "pya": "ぴゃ", "pyu": "ぴゅ", "pyo": "ぴょ",
+        "ka": "か", "ki": "き", "ku": "く", "ke": "け", "ko": "こ",
+        "sa": "さ", "su": "す", "se": "せ", "so": "そ",
+        "ta": "た", "te": "て", "to": "と", "tsu": "つ",
+        "na": "な", "ni": "に", "nu": "ぬ", "ne": "ね", "no": "の",
+        "ha": "は", "hi": "ひ", "fu": "ふ", "hu": "ふ", "he": "へ", "ho": "ほ",
+        "ma": "ま", "mi": "み", "mu": "む", "me": "め", "mo": "も",
+        "ya": "や", "yu": "ゆ", "yo": "よ",
+        "ra": "ら", "ri": "り", "ru": "る", "re": "れ", "ro": "ろ",
+        "wa": "わ", "wi": "ゐ", "we": "ゑ", "wo": "を",
+        "ga": "が", "gi": "ぎ", "gu": "ぐ", "ge": "げ", "go": "ご",
+        "za": "ざ", "zu": "ず", "ze": "ぜ", "zo": "ぞ",
+        "da": "だ", "di": "ぢ", "du": "づ", "de": "で", "do": "ど",
+        "ba": "ば", "bi": "び", "bu": "ぶ", "be": "べ", "bo": "ぼ",
+        "pa": "ぱ", "pi": "ぴ", "pu": "ぷ", "pe": "ぺ", "po": "ぽ",
+        "a": "あ", "i": "い", "u": "う", "e": "え", "o": "お",
+        "ā": "ああ", "ī": "いい", "ū": "うう", "ē": "ええ", "ō": "おお",
+    }
+    for romaji in sorted(romaji_map.keys(), key=len, reverse=True):
+        text = text.replace(romaji, romaji_map[romaji])
+    text = re.sub(r"[\s　]+", "", text)
+    text = re.sub(r"[’・－\-]", "", text)
+    text = "".join([chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in text])
+    text = unicodedata.normalize("NFD", text)
+    text = text.replace("\u3099", "").replace("\u309a", "")
+    text = unicodedata.normalize("NFC", text)
+    vowel_map = {
+        "あ": "あ", "か": "あ", "さ": "あ", "た": "あ", "な": "あ", "は": "あ", "ま": "あ", "や": "あ", "ら": "あ", "わ": "あ", "ぁ": "あ", "ゃ": "あ", "ゎ": "あ",
+        "い": "い", "き": "い", "し": "い", "ち": "い", "に": "い", "ひ": "い", "み": "い", "り": "い", "ゐ": "い", "ぃ": "い",
+        "う": "う", "く": "う", "す": "う", "つ": "う", "ぬ": "う", "ふ": "う", "む": "う", "ゆ": "う", "る": "う", "ぅ": "う", "ゅ": "う",
+        "え": "え", "け": "え", "せ": "え", "て": "え", "ね": "え", "へ": "え", "め": "え", "れ": "え", "ゑ": "え", "ぇ": "え",
+        "お": "お", "こ": "お", "そ": "お", "と": "お", "の": "お", "ほ": "お", "も": "お", "よ": "お", "ろ": "お", "を": "お", "ぉ": "お", "ょ": "お",
+    }
+    res_choonpu = []
+    current_vowel = None
+    for c in text:
+        if c == "ー":
+            if current_vowel:
+                res_choonpu.append(current_vowel)
+            else:
+                res_choonpu.append(c)
+        else:
+            res_choonpu.append(c)
+            if c in vowel_map:
+                current_vowel = vowel_map[c]
+            else:
+                current_vowel = None
+    text = "".join(res_choonpu)
+    small_to_large = str.maketrans("ぁぃぅぇぉゃゅょゎっ", "あいうえおやゆよわつ")
+    text = text.translate(small_to_large)
+    return text
+
+
+def normalize_text(text: str, lang_code: str, is_phonetic: bool) -> str:
+    if not text:
+        return ""
+    if is_phonetic:
+        text = text.replace(" ", "")
+    if lang_code in {"zh-tw", "zh-hk", "zh-mo", "zh-hant"} and not is_phonetic:
+        import opencc
+        converter = opencc.OpenCC("t2s.json")
+        text = converter.convert(text)
+    if lang_code in {"ja", "jp"} and is_phonetic:
+        text = normalize_japanese(text)
+    text = "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn").strip().lower()
+    return text
+
+
+def extract_links(links) -> list[str]:
+    if not links:
+        return []
+    if isinstance(links, str):
+        return [links] if links.strip() else []
+    if isinstance(links, list):
+        return [item for item in links if isinstance(item, str) and item.strip()]
+    return []
+
+
+def extract_anchors_from_json(data, current_path: str = "") -> dict:
+    result = {}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            new_path = f"{current_path}.{key}" if current_path else key
+            result.update(extract_anchors_from_json(value, new_path))
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            new_path = f"{current_path}.{i}" if current_path else str(i)
+            result.update(extract_anchors_from_json(item, new_path))
+    elif isinstance(data, str):
+        pattern = r"\[([^\]]+)\]\(anchor\)"
+        matches = re.findall(pattern, data)
+        for text in matches:
+            result[text] = current_path
+    return result
+
+
 def _get_zstd_dict(db_path: Path) -> bytes | None:
     try:
         conn = sqlite3.connect(str(db_path))
@@ -331,7 +459,7 @@ def compress_entry(data: bytes, zdict_bytes: bytes | None) -> bytes:
     return cctx.compress(data)
 
 
-def upsert_entry_in_db(db_path: Path, entry_json: dict, zdict_bytes: bytes | None = None) -> str:
+def upsert_entry_in_db(db_path: Path, entry_json: dict, zdict_bytes: bytes | None = None, lang_code: str = "en") -> str:
     """将单个词条 upsert 进 dictionary.db。zdict_bytes 可由调用方预先获取并传入，避免重复查询 config 表。"""
     entry_id = entry_json.get("entry_id")
     if entry_id is not None:
@@ -341,38 +469,27 @@ def upsert_entry_in_db(db_path: Path, entry_json: dict, zdict_bytes: bytes | Non
     )
     conn = sqlite3.connect(str(db_path))
     try:
-        cur = conn.execute("PRAGMA table_info(entries)")
-        columns = [row[1] for row in cur.fetchall()]
-        existing = None
         if entry_id is not None:
-            row = conn.execute(
-                "SELECT entry_id FROM entries WHERE entry_id = ?", (entry_id,)
-            ).fetchone()
-            existing = row
-        if existing:
-            conn.execute("UPDATE entries SET json_data = ? WHERE entry_id = ?", (compressed, entry_id))
-            conn.commit()
-            return "updated"
-        else:
-            headword = str(entry_json.get("headword", ""))
-            headword_normalized = _normalize_headword(headword)
-            col_map = {
-                "entry_id": entry_id,
-                "headword": headword or None,
-                "headword_normalized": headword_normalized or None,
-                "entry_type": str(entry_json.get("entry_type", "")) or None,
-                "page": str(entry_json.get("page", "")) or None,
-                "section": str(entry_json.get("section", "")) or None,
-                "version": str(entry_json.get("version", "")) or None,
-                "json_data": compressed,
-            }
-            insert_cols = [c for c in columns if c in col_map]
-            values = [col_map[c] for c in insert_cols]
-            placeholders = ", ".join("?" * len(insert_cols))
-            col_names = ", ".join(insert_cols)
-            conn.execute(f"INSERT INTO entries ({col_names}) VALUES ({placeholders})", values)
-            conn.commit()
-            return "inserted"
+            conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
+        conn.execute("INSERT INTO entries (entry_id, json_data) VALUES (?, ?)", (entry_id, compressed))
+        phonetic_raw = entry_json.get("phonetic", "")
+        phonetic_norm = normalize_text(phonetic_raw, lang_code, True)
+        headword_anchor_map = {}
+        if "headword" in entry_json:
+            headword_anchor_map[entry_json["headword"]] = ""
+        links = entry_json.get("links", [])
+        for link in extract_links(links):
+            headword_anchor_map[link] = ""
+        headword_anchor_map.update(extract_anchors_from_json(entry_json))
+        etype = entry_json.get("entry_type", "")
+        for hw, anchor in headword_anchor_map.items():
+            hw_norm = normalize_text(hw, lang_code, False)
+            conn.execute(
+                "INSERT INTO indices (headword, headword_normalized, phonetic, entry_type, entry_id, anchor) VALUES (?, ?, ?, ?, ?, ?)",
+                (hw, hw_norm, phonetic_norm or None, etype or None, entry_id, anchor or None)
+            )
+        conn.commit()
+        return "upserted"
     finally:
         conn.close()
 
@@ -704,6 +821,7 @@ async def create_dict_impl(
             dictionary_crc32,
             "dictionary.db"
         )
+        clear_wal_shm_files(target_dir / "dictionary.db")
         
         await stream_write_file(
             logo_file,
@@ -721,6 +839,7 @@ async def create_dict_impl(
                 media_crc32,
                 "media.db"
             )
+            clear_wal_shm_files(target_dir / "media.db")
             has_media = True
 
         await invalidate_api_dict_cache(dict_id)
@@ -850,6 +969,7 @@ async def update_dict_impl(
                 dictionary_crc32,
                 "dictionary.db"
             )
+            clear_wal_shm_files(target_dir / "dictionary.db")
             logger.info(f"[update_dict_impl] dictionary_file write done elapsed={time.time()-t0:.1f}s")
             updated_files.append("dictionary.db")
 
@@ -874,6 +994,7 @@ async def update_dict_impl(
                 media_crc32,
                 "media.db"
             )
+            clear_wal_shm_files(target_dir / "media.db")
             logger.info(f"[update_dict_impl] media_file write done elapsed={time.time()-t0:.1f}s")
             has_media = True
             updated_files.append("media.db")
@@ -998,9 +1119,13 @@ async def upsert_dict_entries(
             else:
                 upsert_entries.append(entry)
 
-        # 同步 sqlite3 操作放入线程池避免阻塞事件循环
-        def _do_writes():
-            # 首先获取现有的 entry IDs，用于判断是 insert 还是 update
+        metadata_path = dict_dir(dict_id) / "metadata.json"
+        lang_code = "en"
+        if metadata_path.exists():
+            meta = parse_metadata(metadata_path)
+            lang_code = meta.get("source_language", "en") or "en"
+
+        def _do_writes(lang_code: str):
             existing_eids = set()
             if upsert_entries or delete_entry_ids:
                 db_conn = sqlite3.connect(str(db_path))
@@ -1022,14 +1147,13 @@ async def upsert_dict_entries(
                 finally:
                     db_conn.close()
             if upsert_entries:
-                # _get_zstd_dict 只调用一次，避免每条 entry 都重新连接 config 表
                 zdict_bytes = _get_zstd_dict(db_path)
                 for entry in upsert_entries:
-                    upsert_entry_in_db(db_path, entry, zdict_bytes)
+                    upsert_entry_in_db(db_path, entry, zdict_bytes, lang_code)
             
             return existing_eids
 
-        existing_eids = await asyncio.to_thread(_do_writes)
+        existing_eids = await asyncio.to_thread(_do_writes, lang_code)
         await invalidate_api_dict_cache(dict_id)
         await update_api_checksums(dict_id)
 
