@@ -60,10 +60,13 @@ CACHE_PATH = Path(os.getenv("CACHE_PATH", "/tmp/easydict-cache"))
 
 # 数据库连接缓存
 _db_connections: Dict[str, aiosqlite.Connection] = {}
+_db_mtime_cache: Dict[str, float] = {}
 # Media 数据库连接缓存
 _media_db_connections: Dict[str, aiosqlite.Connection] = {}
+_media_mtime_cache: Dict[str, float] = {}
 # Zstd 解压器缓存（每个词典一个，从 config 表的 zstd_dict 加载）
 _zstd_decompressors: Dict[str, zstd.ZstdDecompressor] = {}
+_zstd_mtime_cache: Dict[str, float] = {}
 
 # ZIP 文件对象缓存
 # 缓存打开的 ZipFile 对象，避免每次请求都重新打开 ZIP 文件
@@ -226,21 +229,36 @@ app.add_middleware(
 
 
 async def get_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
-    """获取词典数据库连接（带缓存）"""
+    """获取词典数据库连接（带缓存，基于文件修改时间自动失效）"""
     cache_key = dict_id
-
-    if cache_key in _db_connections:
-        return _db_connections[cache_key]
-
     db_path = DICTIONARIES_PATH / dict_id / "dictionary.db"
 
     if not db_path.exists():
         return None
 
     try:
+        # 获取当前文件修改时间
+        current_mtime = db_path.stat().st_mtime
+
+        # 检查缓存是否有效（基于修改时间）
+        if cache_key in _db_connections:
+            cached_mtime = _db_mtime_cache.get(cache_key, 0)
+            if cached_mtime == current_mtime:
+                return _db_connections[cache_key]
+            else:
+                # 文件已更新，关闭旧连接
+                logger.info(f"database.db for '{dict_id}' has been modified, reconnecting...")
+                try:
+                    await _db_connections[cache_key].close()
+                except Exception:
+                    pass
+                del _db_connections[cache_key]
+
+        # 建立新连接
         conn = await aiosqlite.connect(str(db_path))
         conn.row_factory = aiosqlite.Row
         _db_connections[cache_key] = conn
+        _db_mtime_cache[cache_key] = current_mtime
         return conn
     except Exception as e:
         logger.error(f"Failed to connect to database {db_path}: {e}")
@@ -249,21 +267,36 @@ async def get_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
 
 
 async def get_media_db_connection(dict_id: str) -> Optional[aiosqlite.Connection]:
-    """获取 media.db 数据库连接（带缓存）"""
+    """获取 media.db 数据库连接（带缓存，基于文件修改时间自动失效）"""
     cache_key = f"media_{dict_id}"
-
-    if cache_key in _media_db_connections:
-        return _media_db_connections[cache_key]
-
     media_db_path = DICTIONARIES_PATH / dict_id / "media.db"
 
     if not media_db_path.exists():
         return None
 
     try:
+        # 获取当前文件修改时间
+        current_mtime = media_db_path.stat().st_mtime
+
+        # 检查缓存是否有效（基于修改时间）
+        if cache_key in _media_db_connections:
+            cached_mtime = _media_mtime_cache.get(cache_key, 0)
+            if cached_mtime == current_mtime:
+                return _media_db_connections[cache_key]
+            else:
+                # 文件已更新，关闭旧连接
+                logger.info(f"media.db for '{dict_id}' has been modified, reconnecting...")
+                try:
+                    await _media_db_connections[cache_key].close()
+                except Exception:
+                    pass
+                del _media_db_connections[cache_key]
+
+        # 建立新连接
         conn = await aiosqlite.connect(str(media_db_path))
         conn.row_factory = aiosqlite.Row
         _media_db_connections[cache_key] = conn
+        _media_mtime_cache[cache_key] = current_mtime
         return conn
     except Exception as e:
         logger.error(f"Failed to connect to media database {media_db_path}: {e}")
@@ -562,35 +595,55 @@ def parse_json_field(value: Optional[str]) -> Any:
 
 
 async def get_zstd_decompressor(dict_id: str) -> Optional[zstd.ZstdDecompressor]:
-    """获取词典的 zstd 解压器（带缓存），从 config 表读取压缩字典"""
-    if dict_id in _zstd_decompressors:
-        return _zstd_decompressors[dict_id]
+    """获取词典的 zstd 解压器（带缓存，基于数据库文件修改时间自动失效）"""
+    db_path = DICTIONARIES_PATH / dict_id / "dictionary.db"
 
-    conn = await get_db_connection(dict_id)
-    if conn is None:
+    if not db_path.exists():
         return None
 
     try:
+        # 获取当前数据库文件修改时间
+        current_mtime = db_path.stat().st_mtime
+
+        # 检查缓存是否有效（基于修改时间）
+        if dict_id in _zstd_decompressors:
+            cached_mtime = _zstd_mtime_cache.get(dict_id, 0)
+            if cached_mtime == current_mtime:
+                return _zstd_decompressors[dict_id]
+            else:
+                # 数据库已更新，清除旧解压器
+                logger.info(f"dictionary.db for '{dict_id}' has been modified, reloading zstd decompressor...")
+                del _zstd_decompressors[dict_id]
+
+        # 获取数据库连接
+        conn = await get_db_connection(dict_id)
+        if conn is None:
+            return None
+
         cursor = await conn.execute(
             "SELECT value FROM config WHERE key = 'zstd_dict'"
         )
         row = await cursor.fetchone()
         await cursor.close()
+
         if row and row[0]:
             zdict = zstd.ZstdCompressionDict(bytes(row[0]))
             dctx = zstd.ZstdDecompressor(dict_data=zdict)
             _zstd_decompressors[dict_id] = dctx
+            _zstd_mtime_cache[dict_id] = current_mtime
             logger.info(f"Loaded zstd dict for '{dict_id}' ({len(bytes(row[0]))} bytes)")
             return dctx
         elif row is not None:
             logger.info(f"Empty zstd_dict for '{dict_id}', using plain decompressor")
             dctx = zstd.ZstdDecompressor()
             _zstd_decompressors[dict_id] = dctx
+            _zstd_mtime_cache[dict_id] = current_mtime
             return dctx
         else:
             logger.info(f"No zstd_dict entry for '{dict_id}', using plain decompressor")
             dctx = zstd.ZstdDecompressor()
             _zstd_decompressors[dict_id] = dctx
+            _zstd_mtime_cache[dict_id] = current_mtime
             return dctx
     except Exception as e:
         logger.warning(f"Failed to load zstd dict for '{dict_id}', will retry next request: {e}")
@@ -748,25 +801,38 @@ ALLOWED_FILES = {
 CHECKSUM_FILES = {"dictionary.db", "media.db"}
 
 _metadata_checksums_cache: Dict[str, Dict[str, str]] = {}
+_metadata_mtime_cache: Dict[str, float] = {}
 
 
 def get_checksum_from_metadata(dict_id: str, filename: str) -> Optional[str]:
-    """从 metadata.json 获取指定文件的 CRC32 校验值"""
+    """从 metadata.json 获取指定文件的 CRC32 校验值
+
+    使用基于文件修改时间的缓存失效机制，确保多 worker 环境下数据一致性
+    """
     if filename not in CHECKSUM_FILES:
         return None
-
-    if dict_id in _metadata_checksums_cache:
-        return _metadata_checksums_cache[dict_id].get(filename)
 
     metadata_path = DICTIONARIES_PATH / dict_id / "metadata.json"
     if not metadata_path.exists():
         return None
 
     try:
+        # 获取文件修改时间
+        current_mtime = metadata_path.stat().st_mtime
+
+        # 检查缓存是否仍然有效（基于修改时间）
+        if dict_id in _metadata_checksums_cache:
+            cached_mtime = _metadata_mtime_cache.get(dict_id, 0)
+            if cached_mtime == current_mtime:
+                # 缓存有效，直接返回
+                return _metadata_checksums_cache[dict_id].get(filename)
+
+        # 缓存无效或不存在，重新读取
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
         checksums = metadata.get("checksums", {})
         _metadata_checksums_cache[dict_id] = checksums
+        _metadata_mtime_cache[dict_id] = current_mtime
         return checksums.get(filename)
     except Exception as e:
         logger.warning(f"Failed to read checksums from metadata for {dict_id}: {e}")
@@ -1007,6 +1073,10 @@ async def invalidate_dict_cache(dict_id: str):
         del _db_connections[dict_id]
         closed_db = True
 
+    # 同时清除 db mtime 缓存
+    if dict_id in _db_mtime_cache:
+        del _db_mtime_cache[dict_id]
+
     closed_media = False
     media_key = f"media_{dict_id}"
     if media_key in _media_db_connections:
@@ -1017,8 +1087,22 @@ async def invalidate_dict_cache(dict_id: str):
         del _media_db_connections[media_key]
         closed_media = True
 
+    # 同时清除 media mtime 缓存
+    if media_key in _media_mtime_cache:
+        del _media_mtime_cache[media_key]
+
     if dict_id in _zstd_decompressors:
         del _zstd_decompressors[dict_id]
+
+    # 同时清除 zstd mtime 缓存
+    if dict_id in _zstd_mtime_cache:
+        del _zstd_mtime_cache[dict_id]
+
+    # 同时清除 checksums 缓存
+    if dict_id in _metadata_checksums_cache:
+        del _metadata_checksums_cache[dict_id]
+    if dict_id in _metadata_mtime_cache:
+        del _metadata_mtime_cache[dict_id]
 
     logger.info(f"Cache invalidated for '{dict_id}' (db={closed_db}, media={closed_media})")
     return {"invalidated": dict_id}

@@ -858,6 +858,16 @@ async def create_dict_impl(
         if has_media:
             await record_version(dict_id, ver, message, "file", "media.db")
 
+        # Update metadata.json version and updated_at
+        metadata_path = target_dir / "metadata.json"
+        try:
+            meta = parse_metadata(metadata_path)
+            meta["version"] = ver
+            meta["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+            metadata_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to update metadata.json version: {e}")
+
         return {"success": True, "version": ver}
     except Exception as e:
         shutil.rmtree(target_dir, ignore_errors=True)
@@ -1018,6 +1028,17 @@ async def update_dict_impl(
         ver = await next_version(dict_id)
         for fname in updated_files:
             await record_version(dict_id, ver, message, "file", fname)
+
+        # Update metadata.json version and updated_at
+        metadata_path = target_dir / "metadata.json"
+        if metadata_path.exists():
+            try:
+                meta = parse_metadata(metadata_path)
+                meta["version"] = ver
+                meta["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+                metadata_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Failed to update metadata.json version: {e}")
 
         logger.info(f"[update_dict_impl] DONE dict_id={dict_id} updated_files={updated_files} total={time.time()-t0:.1f}s")
         return {"success": True, "version": ver}
