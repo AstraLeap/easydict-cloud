@@ -5,7 +5,7 @@ services:
     image: nginx:alpine
     container_name: easydict-nginx
     ports:
-      - "${NGINX_PORT:-3070}:80"
+      - "127.0.0.1:${NGINX_PORT:-3070}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ${DATA_PATH:-./easydict-data}/dictionaries:/data/dictionaries:ro
